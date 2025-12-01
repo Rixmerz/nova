@@ -10,6 +10,495 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
+// ============================================================================
+// Claude CLI Options - Flexible Configuration
+// ============================================================================
+
+/// Output format for Claude CLI responses
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutputFormat {
+    Text,
+    Json,
+    #[default]
+    StreamJson,
+}
+
+impl OutputFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OutputFormat::Text => "text",
+            OutputFormat::Json => "json",
+            OutputFormat::StreamJson => "stream-json",
+        }
+    }
+}
+
+/// Input format for Claude CLI
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum InputFormat {
+    #[default]
+    Text,
+    StreamJson,
+}
+
+impl InputFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InputFormat::Text => "text",
+            InputFormat::StreamJson => "stream-json",
+        }
+    }
+}
+
+/// Permission mode for Claude sessions
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PermissionMode {
+    #[default]
+    Default,
+    AcceptEdits,
+    BypassPermissions,
+    DontAsk,
+    Plan,
+}
+
+impl PermissionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PermissionMode::Default => "default",
+            PermissionMode::AcceptEdits => "acceptEdits",
+            PermissionMode::BypassPermissions => "bypassPermissions",
+            PermissionMode::DontAsk => "dontAsk",
+            PermissionMode::Plan => "plan",
+        }
+    }
+}
+
+/// Session mode - how to start the Claude session
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionMode {
+    /// Start a new session
+    #[default]
+    New,
+    /// Continue the most recent conversation (-c)
+    Continue,
+    /// Resume a specific session by ID (--resume <id>)
+    Resume { session_id: String },
+}
+
+/// Comprehensive Claude CLI options
+/// Supports all Claude CLI flags for maximum flexibility
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeOptions {
+    // === Required ===
+    /// The prompt/message to send to Claude
+    pub prompt: String,
+
+    // === Session Control ===
+    /// How to start the session (new, continue, resume)
+    #[serde(default)]
+    pub session_mode: SessionMode,
+
+    // === Model Selection ===
+    /// Model to use (e.g., "sonnet", "opus", "claude-sonnet-4-5-20250929")
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Fallback model when default is overloaded (only with print mode)
+    #[serde(default)]
+    pub fallback_model: Option<String>,
+
+    // === Output Control ===
+    /// Print response and exit (non-interactive mode)
+    #[serde(default = "default_true")]
+    pub print: bool,
+
+    /// Output format: text, json, stream-json
+    #[serde(default)]
+    pub output_format: OutputFormat,
+
+    /// Input format: text, stream-json
+    #[serde(default)]
+    pub input_format: InputFormat,
+
+    /// JSON Schema for structured output validation
+    #[serde(default)]
+    pub json_schema: Option<String>,
+
+    /// Include partial message chunks (with stream-json)
+    #[serde(default)]
+    pub include_partial_messages: bool,
+
+    /// Re-emit user messages for acknowledgment
+    #[serde(default)]
+    pub replay_user_messages: bool,
+
+    // === System Prompt ===
+    /// Custom system prompt
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+
+    /// Append to default system prompt
+    #[serde(default)]
+    pub append_system_prompt: Option<String>,
+
+    // === Permissions & Security ===
+    /// Permission mode for the session
+    #[serde(default)]
+    pub permission_mode: PermissionMode,
+
+    /// Bypass all permission checks (dangerous!)
+    #[serde(default)]
+    pub dangerously_skip_permissions: bool,
+
+    /// Enable bypassing permissions as an option
+    #[serde(default)]
+    pub allow_dangerously_skip_permissions: bool,
+
+    // === Tools Control ===
+    /// Allowed tools (e.g., ["Bash(git:*)", "Edit"])
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+
+    /// Disallowed tools
+    #[serde(default)]
+    pub disallowed_tools: Vec<String>,
+
+    /// Available tools from built-in set (empty = disable all, "default" = all)
+    #[serde(default)]
+    pub tools: Vec<String>,
+
+    // === MCP Configuration ===
+    /// MCP server config files or JSON strings
+    #[serde(default)]
+    pub mcp_config: Vec<String>,
+
+    /// Only use MCP servers from --mcp-config
+    #[serde(default)]
+    pub strict_mcp_config: bool,
+
+    // === Directories ===
+    /// Additional directories to allow tool access
+    #[serde(default)]
+    pub add_dir: Vec<String>,
+
+    // === Session Management ===
+    /// Fork session when resuming (create new session ID)
+    #[serde(default)]
+    pub fork_session: bool,
+
+    /// Use specific session ID (must be valid UUID)
+    #[serde(default)]
+    pub session_id: Option<String>,
+
+    // === Debug & Logging ===
+    /// Enable debug mode with optional filter
+    #[serde(default)]
+    pub debug: Option<String>,
+
+    /// Enable verbose output
+    #[serde(default)]
+    pub verbose: bool,
+
+    // === IDE Integration ===
+    /// Auto-connect to IDE on startup
+    #[serde(default)]
+    pub ide: bool,
+
+    // === Settings ===
+    /// Path to settings JSON file or JSON string
+    #[serde(default)]
+    pub settings: Option<String>,
+
+    /// Setting sources to load (user, project, local)
+    #[serde(default)]
+    pub setting_sources: Vec<String>,
+
+    // === Agents ===
+    /// Custom agents JSON definition
+    #[serde(default)]
+    pub agents: Option<String>,
+
+    // === Plugins ===
+    /// Plugin directories
+    #[serde(default)]
+    pub plugin_dir: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for ClaudeOptions {
+    fn default() -> Self {
+        Self {
+            prompt: String::new(),
+            session_mode: SessionMode::New,
+            model: None,
+            fallback_model: None,
+            print: true,
+            output_format: OutputFormat::StreamJson,
+            input_format: InputFormat::Text,
+            json_schema: None,
+            include_partial_messages: false,
+            replay_user_messages: false,
+            system_prompt: None,
+            append_system_prompt: None,
+            permission_mode: PermissionMode::Default,
+            dangerously_skip_permissions: false,
+            allow_dangerously_skip_permissions: false,
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            tools: Vec::new(),
+            mcp_config: Vec::new(),
+            strict_mcp_config: false,
+            add_dir: Vec::new(),
+            fork_session: false,
+            session_id: None,
+            debug: None,
+            verbose: false,
+            ide: false,
+            settings: None,
+            setting_sources: Vec::new(),
+            agents: None,
+            plugin_dir: Vec::new(),
+        }
+    }
+}
+
+impl ClaudeOptions {
+    /// Create new options with just a prompt
+    pub fn new(prompt: impl Into<String>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Builder: set model
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// Builder: set session mode to continue
+    pub fn continue_session(mut self) -> Self {
+        self.session_mode = SessionMode::Continue;
+        self
+    }
+
+    /// Builder: set session mode to resume with ID
+    pub fn resume_session(mut self, session_id: impl Into<String>) -> Self {
+        self.session_mode = SessionMode::Resume {
+            session_id: session_id.into(),
+        };
+        self
+    }
+
+    /// Builder: enable dangerous skip permissions
+    pub fn skip_permissions(mut self) -> Self {
+        self.dangerously_skip_permissions = true;
+        self
+    }
+
+    /// Builder: set verbose mode
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
+    /// Build CLI arguments from options
+    pub fn to_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+
+        // Session mode (must come before prompt for resume)
+        match &self.session_mode {
+            SessionMode::New => {}
+            SessionMode::Continue => {
+                args.push("-c".to_string());
+            }
+            SessionMode::Resume { session_id } => {
+                args.push("--resume".to_string());
+                args.push(session_id.clone());
+            }
+        }
+
+        // Fork session
+        if self.fork_session {
+            args.push("--fork-session".to_string());
+        }
+
+        // Print mode (always needed for non-interactive)
+        if self.print {
+            args.push("-p".to_string());
+        }
+
+        // Prompt
+        if !self.prompt.is_empty() {
+            args.push(self.prompt.clone());
+        }
+
+        // Model
+        if let Some(ref model) = self.model {
+            args.push("--model".to_string());
+            args.push(model.clone());
+        }
+
+        // Fallback model
+        if let Some(ref fallback) = self.fallback_model {
+            args.push("--fallback-model".to_string());
+            args.push(fallback.clone());
+        }
+
+        // Output format
+        args.push("--output-format".to_string());
+        args.push(self.output_format.as_str().to_string());
+
+        // Input format (only if not default)
+        if !matches!(self.input_format, InputFormat::Text) {
+            args.push("--input-format".to_string());
+            args.push(self.input_format.as_str().to_string());
+        }
+
+        // JSON schema
+        if let Some(ref schema) = self.json_schema {
+            args.push("--json-schema".to_string());
+            args.push(schema.clone());
+        }
+
+        // Partial messages
+        if self.include_partial_messages {
+            args.push("--include-partial-messages".to_string());
+        }
+
+        // Replay user messages
+        if self.replay_user_messages {
+            args.push("--replay-user-messages".to_string());
+        }
+
+        // System prompt
+        if let Some(ref prompt) = self.system_prompt {
+            args.push("--system-prompt".to_string());
+            args.push(prompt.clone());
+        }
+
+        // Append system prompt
+        if let Some(ref prompt) = self.append_system_prompt {
+            args.push("--append-system-prompt".to_string());
+            args.push(prompt.clone());
+        }
+
+        // Permission mode
+        if !matches!(self.permission_mode, PermissionMode::Default) {
+            args.push("--permission-mode".to_string());
+            args.push(self.permission_mode.as_str().to_string());
+        }
+
+        // Dangerously skip permissions
+        if self.dangerously_skip_permissions {
+            args.push("--dangerously-skip-permissions".to_string());
+        }
+
+        // Allow dangerously skip permissions
+        if self.allow_dangerously_skip_permissions {
+            args.push("--allow-dangerously-skip-permissions".to_string());
+        }
+
+        // Allowed tools
+        if !self.allowed_tools.is_empty() {
+            args.push("--allowed-tools".to_string());
+            args.extend(self.allowed_tools.clone());
+        }
+
+        // Disallowed tools
+        if !self.disallowed_tools.is_empty() {
+            args.push("--disallowed-tools".to_string());
+            args.extend(self.disallowed_tools.clone());
+        }
+
+        // Tools
+        if !self.tools.is_empty() {
+            args.push("--tools".to_string());
+            args.extend(self.tools.clone());
+        }
+
+        // MCP config
+        for config in &self.mcp_config {
+            args.push("--mcp-config".to_string());
+            args.push(config.clone());
+        }
+
+        // Strict MCP config
+        if self.strict_mcp_config {
+            args.push("--strict-mcp-config".to_string());
+        }
+
+        // Additional directories
+        for dir in &self.add_dir {
+            args.push("--add-dir".to_string());
+            args.push(dir.clone());
+        }
+
+        // Session ID
+        if let Some(ref id) = self.session_id {
+            args.push("--session-id".to_string());
+            args.push(id.clone());
+        }
+
+        // Debug
+        if let Some(ref filter) = self.debug {
+            args.push("--debug".to_string());
+            if !filter.is_empty() {
+                args.push(filter.clone());
+            }
+        }
+
+        // Verbose
+        if self.verbose {
+            args.push("--verbose".to_string());
+        }
+
+        // IDE
+        if self.ide {
+            args.push("--ide".to_string());
+        }
+
+        // Settings
+        if let Some(ref settings) = self.settings {
+            args.push("--settings".to_string());
+            args.push(settings.clone());
+        }
+
+        // Setting sources
+        if !self.setting_sources.is_empty() {
+            args.push("--setting-sources".to_string());
+            args.push(self.setting_sources.join(","));
+        }
+
+        // Agents
+        if let Some(ref agents) = self.agents {
+            args.push("--agents".to_string());
+            args.push(agents.clone());
+        }
+
+        // Plugin directories
+        for dir in &self.plugin_dir {
+            args.push("--plugin-dir".to_string());
+            args.push(dir.clone());
+        }
+
+        args
+    }
+}
+
+// ============================================================================
+// Original Code Below
+// ============================================================================
+
 /// Global state to track current Claude process
 pub struct ClaudeProcessState {
     pub current_process: Arc<Mutex<Option<Child>>>,
@@ -916,102 +1405,32 @@ pub async fn load_session_history(
     Ok(messages)
 }
 
-/// Execute a new interactive Claude Code session with streaming output
+// ============================================================================
+// Unified Claude Execution API
+// ============================================================================
+
+/// Execute Claude with full options support
+/// This is the primary API - frontend sends ClaudeOptions, backend executes
 #[tauri::command]
-pub async fn execute_claude_code(
+pub async fn execute_claude(
     app: AppHandle,
     project_path: String,
-    prompt: String,
-    model: String,
+    options: ClaudeOptions,
 ) -> Result<(), String> {
     log::info!(
-        "Starting new Claude Code session in: {} with model: {}",
+        "Executing Claude in: {} with options: {:?}",
         project_path,
-        model
+        options
     );
 
     let claude_path = find_claude_binary(&app)?;
+    let args = options.to_args();
 
-    let args = vec![
-        "-p".to_string(),
-        prompt.clone(),
-        "--model".to_string(),
-        model.clone(),
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--verbose".to_string(),
-        "--dangerously-skip-permissions".to_string(),
-    ];
+    log::debug!("Claude CLI args: {:?}", args);
 
     let cmd = create_system_command(&claude_path, args, &project_path);
-    spawn_claude_process(app, cmd, prompt, model, project_path).await
-}
-
-/// Continue an existing Claude Code conversation with streaming output
-#[tauri::command]
-pub async fn continue_claude_code(
-    app: AppHandle,
-    project_path: String,
-    prompt: String,
-    model: String,
-) -> Result<(), String> {
-    log::info!(
-        "Continuing Claude Code conversation in: {} with model: {}",
-        project_path,
-        model
-    );
-
-    let claude_path = find_claude_binary(&app)?;
-
-    let args = vec![
-        "-c".to_string(), // Continue flag
-        "-p".to_string(),
-        prompt.clone(),
-        "--model".to_string(),
-        model.clone(),
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--verbose".to_string(),
-        "--dangerously-skip-permissions".to_string(),
-    ];
-
-    let cmd = create_system_command(&claude_path, args, &project_path);
-    spawn_claude_process(app, cmd, prompt, model, project_path).await
-}
-
-/// Resume an existing Claude Code session by ID with streaming output
-#[tauri::command]
-pub async fn resume_claude_code(
-    app: AppHandle,
-    project_path: String,
-    session_id: String,
-    prompt: String,
-    model: String,
-) -> Result<(), String> {
-    log::info!(
-        "Resuming Claude Code session: {} in: {} with model: {}",
-        session_id,
-        project_path,
-        model
-    );
-
-    let claude_path = find_claude_binary(&app)?;
-
-    let args = vec![
-        "--resume".to_string(),
-        session_id.clone(),
-        "-p".to_string(),
-        prompt.clone(),
-        "--model".to_string(),
-        model.clone(),
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--verbose".to_string(),
-        "--dangerously-skip-permissions".to_string(),
-    ];
-
-    let cmd = create_system_command(&claude_path, args, &project_path);
-    spawn_claude_process(app, cmd, prompt, model, project_path).await
+    let model = options.model.clone().unwrap_or_else(|| "default".to_string());
+    spawn_claude_process(app, cmd, options.prompt.clone(), model, project_path).await
 }
 
 /// Cancel the currently running Claude Code execution
