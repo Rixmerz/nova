@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Clock, Sparkles, Zap } from 'lucide-react';
+import { X, Clock, Sparkles, Crown, Feather } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils';
 interface QueuedPrompt {
   id: string;
   prompt: string;
-  model: "sonnet" | "opus";
+  model: "haiku" | "sonnet" | "opus";
 }
 
 interface PromptQueueProps {
@@ -53,16 +53,18 @@ export const PromptQueue: React.FC<PromptQueueProps> = React.memo(({
               >
                 <div className="flex-shrink-0 mt-0.5">
                   {queuedPrompt.model === "opus" ? (
-                    <Sparkles className="h-3.5 w-3.5 text-purple-500" />
+                    <Crown className="h-3.5 w-3.5 text-amber-500" />
+                  ) : queuedPrompt.model === "sonnet" ? (
+                    <Sparkles className="h-3.5 w-3.5 text-primary" />
                   ) : (
-                    <Zap className="h-3.5 w-3.5 text-amber-500" />
+                    <Feather className="h-3.5 w-3.5 text-green-500" />
                   )}
                 </div>
-                
+
                 <div className="flex-1 min-w-0">
                   <p className="text-sm truncate">{queuedPrompt.prompt}</p>
                   <span className="text-xs text-muted-foreground">
-                    {queuedPrompt.model === "opus" ? "Opus" : "Sonnet"}
+                    {queuedPrompt.model === "opus" ? "Opus" : queuedPrompt.model === "sonnet" ? "Sonnet" : "Haiku"}
                   </span>
                 </div>
                 
