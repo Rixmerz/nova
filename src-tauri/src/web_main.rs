@@ -3,6 +3,7 @@ use clap::Parser;
 mod checkpoint;
 mod claude_binary;
 mod commands;
+mod debug;
 mod process;
 mod web_server;
 

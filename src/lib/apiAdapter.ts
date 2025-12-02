@@ -129,31 +129,138 @@ async function restApiCall<T>(endpoint: string, params?: any): Promise<T> {
 }
 
 /**
+ * Check if a string is a valid UUID format
+ */
+function isValidUUID(str: string): boolean {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return uuidRegex.test(str);
+}
+
+/**
+ * Transform legacy Claude commands to the new unified execute_claude format
+ * Returns null if no transformation is needed
+ */
+function transformLegacyClaudeCommand(command: string, params?: any): { command: string; params: any } | null {
+  // Map legacy streaming commands to execute_claude with ClaudeOptions
+  if (command === 'execute_claude_code') {
+    return {
+      command: 'execute_claude',
+      params: {
+        projectPath: params?.projectPath || params?.project_path,
+        options: {
+          prompt: params?.prompt || '',
+          sessionMode: 'new',
+          model: params?.model,
+          print: true,
+          outputFormat: 'stream-json',
+          verbose: true, // Required: --output-format=stream-json requires --verbose when using --print
+        }
+      }
+    };
+  }
+
+  if (command === 'continue_claude_code') {
+    return {
+      command: 'execute_claude',
+      params: {
+        projectPath: params?.projectPath || params?.project_path,
+        options: {
+          prompt: params?.prompt || '',
+          sessionMode: 'continue',
+          model: params?.model,
+          print: true,
+          outputFormat: 'stream-json',
+          verbose: true, // Required: --output-format=stream-json requires --verbose when using --print
+        }
+      }
+    };
+  }
+
+  if (command === 'resume_claude_code') {
+    const sessionId = params?.sessionId || params?.session_id;
+
+    // If session ID is not a valid UUID, fallback to continue mode
+    // Claude CLI requires proper UUID format for resume operations
+    if (!sessionId || !isValidUUID(sessionId)) {
+      console.warn(`[Tauri] Invalid session ID "${sessionId}", falling back to continue mode`);
+      return {
+        command: 'execute_claude',
+        params: {
+          projectPath: params?.projectPath || params?.project_path,
+          options: {
+            prompt: params?.prompt || '',
+            sessionMode: 'continue', // Fallback to continue mode
+            model: params?.model,
+            print: true,
+            outputFormat: 'stream-json',
+            verbose: true,
+          }
+        }
+      };
+    }
+
+    // Valid UUID - proceed with resume
+    return {
+      command: 'execute_claude',
+      params: {
+        projectPath: params?.projectPath || params?.project_path,
+        options: {
+          prompt: params?.prompt || '',
+          // Serde expects: { "resume": { "session_id": "..." } } for enum variant with data
+          // Note: The enum has #[serde(rename_all = "camelCase")] but struct fields inside variants are NOT affected
+          sessionMode: { resume: { session_id: sessionId } },
+          model: params?.model,
+          print: true,
+          outputFormat: 'stream-json',
+          verbose: true, // Required: --output-format=stream-json requires --verbose when using --print
+        }
+      }
+    };
+  }
+
+  return null;
+}
+
+/**
  * Unified API adapter that works in both Tauri and web environments
  */
 export async function apiCall<T>(command: string, params?: any): Promise<T> {
   const isWeb = !detectEnvironment();
-  
+
+  // Transform legacy Claude commands for Tauri environment
+  const legacyStreamingCommands = ['execute_claude_code', 'continue_claude_code', 'resume_claude_code'];
+
   if (!isWeb) {
     // Tauri environment - try invoke
-    console.log(`[Tauri] Calling: ${command}`, params);
+    let actualCommand = command;
+    let actualParams = params;
+
+    // Transform legacy commands to execute_claude
+    const transformed = transformLegacyClaudeCommand(command, params);
+    if (transformed) {
+      actualCommand = transformed.command;
+      actualParams = transformed.params;
+      console.log(`[Tauri] Transformed ${command} -> ${actualCommand}`, actualParams);
+    } else {
+      console.log(`[Tauri] Calling: ${command}`, params);
+    }
+
     try {
-      return await invoke<T>(command, params);
+      return await invoke<T>(actualCommand, actualParams);
     } catch (error) {
       console.warn(`[Tauri] invoke failed, falling back to web mode:`, error);
       // Fall through to web mode
     }
   }
-  
+
   // Web environment - use REST API
   console.log(`[Web] Calling: ${command}`, params);
-  
+
   // Special handling for commands that use streaming/events
-  const streamingCommands = ['execute_claude_code', 'continue_claude_code', 'resume_claude_code'];
-  if (streamingCommands.includes(command)) {
+  if (legacyStreamingCommands.includes(command)) {
     return handleStreamingCommand<T>(command, params);
   }
-  
+
   // Map Tauri commands to REST endpoints
   const endpoint = mapCommandToEndpoint(command, params);
   return await restApiCall<T>(endpoint, params);

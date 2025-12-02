@@ -15,38 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Popover } from "@/components/ui/popover";
 import { api, type Session } from "@/lib/api";
 import { cn } from "@/lib/utils";
-
-// Conditional imports for Tauri APIs
-let tauriListen: any;
-type UnlistenFn = () => void;
-
-try {
-  if (typeof window !== 'undefined' && window.__TAURI__) {
-    tauriListen = require("@tauri-apps/api/event").listen;
-  }
-} catch (e) {
-  console.log('[ClaudeCodeSession] Tauri APIs not available, using web mode');
-}
-
-// Web-compatible replacements
-const listen = tauriListen || ((eventName: string, callback: (event: any) => void) => {
-  console.log('[ClaudeCodeSession] Setting up DOM event listener for:', eventName);
-
-  // In web mode, listen for DOM events
-  const domEventHandler = (event: any) => {
-    console.log('[ClaudeCodeSession] DOM event received:', eventName, event.detail);
-    // Simulate Tauri event structure
-    callback({ payload: event.detail });
-  };
-
-  window.addEventListener(eventName, domEventHandler);
-
-  // Return unlisten function
-  return Promise.resolve(() => {
-    console.log('[ClaudeCodeSession] Removing DOM event listener for:', eventName);
-    window.removeEventListener(eventName, domEventHandler);
-  });
-});
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { StreamMessage } from "./StreamMessage";
 import { FloatingPromptInput, type FloatingPromptInputRef } from "./FloatingPromptInput";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -146,7 +115,8 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
   const isListeningRef = useRef(false);
   const sessionStartTime = useRef<number>(Date.now());
   const isIMEComposingRef = useRef(false);
-  
+  const processedUuidsRef = useRef<Set<string>>(new Set());
+
   // Session metrics state for enhanced analytics
   const sessionMetrics = useRef({
     firstMessageTime: null as number | null,
@@ -510,7 +480,9 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
       setIsLoading(true);
       setError(null);
       hasActiveSessionRef.current = true;
-      
+      // Clear processed UUIDs for new message stream (prevents false-positive deduplication)
+      processedUuidsRef.current.clear();
+
       // For resuming sessions, ensure we have the session ID
       if (effectiveSession && !claudeSessionId) {
         setClaudeSessionId(effectiveSession.id);
@@ -619,7 +591,16 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
               message = payload;
               rawPayload = JSON.stringify(payload);
             }
-            
+
+            // Deduplicate by UUID to prevent double-processing from generic + session-specific events
+            if (message.uuid && processedUuidsRef.current.has(message.uuid)) {
+              console.log('[ClaudeCodeSession] Skipping duplicate message:', message.uuid);
+              return;
+            }
+            if (message.uuid) {
+              processedUuidsRef.current.add(message.uuid);
+            }
+
             console.log('[ClaudeCodeSession] handleStreamMessage - message type:', message.type);
 
             // Store raw JSONL

@@ -280,57 +280,71 @@ const FloatingPromptInputInner = (
         }
 
         const webview = getCurrentWebviewWindow();
-        unlistenDragDropRef.current = await webview.onDragDropEvent((event: any) => {
-          if (event.payload.type === 'enter' || event.payload.type === 'over') {
-            setDragActive(true);
-          } else if (event.payload.type === 'leave') {
-            setDragActive(false);
-          } else if (event.payload.type === 'drop' && event.payload.paths) {
-            setDragActive(false);
 
-            const currentTime = Date.now();
-            if (currentTime - lastDropTime < 200) {
-              // This debounce is crucial to handle the storm of drop events
-              // that Tauri/OS can fire for a single user action.
-              return;
-            }
-            lastDropTime = currentTime;
-
-            const droppedPaths = event.payload.paths as string[];
-            const imagePaths = droppedPaths.filter(isImageFile);
-
-            if (imagePaths.length > 0) {
-              setPrompt(currentPrompt => {
-                const existingPaths = extractImagePaths(currentPrompt);
-                const newPaths = imagePaths.filter(p => !existingPaths.includes(p));
-
-                if (newPaths.length === 0) {
-                  return currentPrompt; // All dropped images are already in the prompt
-                }
-
-                // Wrap paths with spaces in quotes for clarity
-                const mentionsToAdd = newPaths.map(p => {
-                  // If path contains spaces, wrap in quotes
-                  if (p.includes(' ')) {
-                    return `@"${p}"`;
-                  }
-                  return `@${p}`;
-                }).join(' ');
-                const newPrompt = currentPrompt + (currentPrompt.endsWith(' ') || currentPrompt === '' ? '' : ' ') + mentionsToAdd + ' ';
-
-                setTimeout(() => {
-                  const target = isExpanded ? expandedTextareaRef.current : textareaRef.current;
-                  target?.focus();
-                  target?.setSelectionRange(newPrompt.length, newPrompt.length);
-                }, 0);
-
-                return newPrompt;
-              });
-            }
-          }
-        });
+        // Check if the new Tauri v2 API method exists, otherwise try the listen API
+        if (typeof webview.onDragDropEvent === 'function') {
+          unlistenDragDropRef.current = await webview.onDragDropEvent((event: any) => {
+            handleDragDropEvent(event);
+          });
+        } else {
+          // Fallback: Use the event listener API for Tauri v2
+          const { listen } = await import("@tauri-apps/api/event");
+          unlistenDragDropRef.current = await listen('tauri://drag-drop', (event: any) => {
+            handleDragDropEvent(event);
+          });
+        }
       } catch (error) {
-        console.error('Failed to set up Tauri drag-drop listener:', error);
+        console.warn('[FloatingPromptInput] Drag-drop listener not available, feature disabled:', error);
+      }
+    };
+
+    const handleDragDropEvent = (event: any) => {
+      if (event.payload.type === 'enter' || event.payload.type === 'over') {
+        setDragActive(true);
+      } else if (event.payload.type === 'leave') {
+        setDragActive(false);
+      } else if (event.payload.type === 'drop' && event.payload.paths) {
+        setDragActive(false);
+
+        const currentTime = Date.now();
+        if (currentTime - lastDropTime < 200) {
+          // This debounce is crucial to handle the storm of drop events
+          // that Tauri/OS can fire for a single user action.
+          return;
+        }
+        lastDropTime = currentTime;
+
+        const droppedPaths = event.payload.paths as string[];
+        const imagePaths = droppedPaths.filter(isImageFile);
+
+        if (imagePaths.length > 0) {
+          setPrompt(currentPrompt => {
+            const existingPaths = extractImagePaths(currentPrompt);
+            const newPaths = imagePaths.filter(p => !existingPaths.includes(p));
+
+            if (newPaths.length === 0) {
+              return currentPrompt; // All dropped images are already in the prompt
+            }
+
+            // Wrap paths with spaces in quotes for clarity
+            const mentionsToAdd = newPaths.map(p => {
+              // If path contains spaces, wrap in quotes
+              if (p.includes(' ')) {
+                return `@"${p}"`;
+              }
+              return `@${p}`;
+            }).join(' ');
+            const newPrompt = currentPrompt + (currentPrompt.endsWith(' ') || currentPrompt === '' ? '' : ' ') + mentionsToAdd + ' ';
+
+            setTimeout(() => {
+              const target = isExpanded ? expandedTextareaRef.current : textareaRef.current;
+              target?.focus();
+              target?.setSelectionRange(newPrompt.length, newPrompt.length);
+            }, 0);
+
+            return newPrompt;
+          });
+        }
       }
     };
 

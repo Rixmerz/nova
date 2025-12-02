@@ -4,6 +4,7 @@
 mod checkpoint;
 mod claude_binary;
 mod commands;
+mod debug;
 mod process;
 
 use checkpoint::state::CheckpointState;
@@ -58,6 +59,22 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            // Initialize debug mode if enabled via OPCODE_DEBUG=1
+            if debug::is_debug_enabled() {
+                match debug::DebugLogger::new(debug::DEBUG_SESSION_NAME) {
+                    Ok(logger) => {
+                        app.manage(debug::DebugState::new(logger));
+                        log::info!(
+                            "Debug mode enabled - attach with: tmux attach -t {}",
+                            debug::DEBUG_SESSION_NAME
+                        );
+                    }
+                    Err(e) => {
+                        log::error!("Failed to initialize debug mode: {}", e);
+                    }
+                }
+            }
+
             // Initialize agents database
             let conn = init_database(&app.handle()).expect("Failed to initialize agents database");
 

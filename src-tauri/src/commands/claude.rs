@@ -1,5 +1,7 @@
+use crate::debug::DebugState;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -9,6 +11,39 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
+
+// ============================================================================
+// Debug Helper Functions
+// ============================================================================
+
+/// Emit an event to the frontend and log it to the debug session if enabled
+fn emit_debug<S: Serialize + Clone>(app: &AppHandle, event: &str, payload: S) {
+    // Emit the event to the frontend first (never block this)
+    let _ = app.emit(event, payload.clone());
+
+    // Log to debug session if enabled (non-blocking)
+    if let Some(debug_state) = app.try_state::<DebugState>() {
+        if let Ok(value) = serde_json::to_value(&payload) {
+            if let Ok(logger) = debug_state.logger.try_lock() {
+                logger.log_event(event, &value);
+            }
+        }
+    }
+}
+
+/// Emit an event with a string payload to the frontend and log it to the debug session
+fn emit_debug_str(app: &AppHandle, event: &str, payload: &str) {
+    // Emit the event to the frontend first (never block this)
+    let _ = app.emit(event, payload);
+
+    // Log to debug session if enabled (non-blocking)
+    if let Some(debug_state) = app.try_state::<DebugState>() {
+        let value = Value::String(payload.to_string());
+        if let Ok(logger) = debug_state.logger.try_lock() {
+            logger.log_event(event, &value);
+        }
+    }
+}
 
 // ============================================================================
 // Claude CLI Options - Flexible Configuration
@@ -1417,6 +1452,19 @@ pub async fn execute_claude(
     project_path: String,
     options: ClaudeOptions,
 ) -> Result<(), String> {
+    let start = std::time::Instant::now();
+
+    // Debug logging - invoke (non-blocking)
+    if let Some(debug_state) = app.try_state::<DebugState>() {
+        let params = serde_json::json!({
+            "project_path": &project_path,
+            "options": &options,
+        });
+        if let Ok(logger) = debug_state.logger.try_lock() {
+            logger.log_invoke("execute_claude", &params);
+        }
+    }
+
     log::info!(
         "Executing Claude in: {} with options: {:?}",
         project_path,
@@ -1430,7 +1478,28 @@ pub async fn execute_claude(
 
     let cmd = create_system_command(&claude_path, args, &project_path);
     let model = options.model.clone().unwrap_or_else(|| "default".to_string());
-    spawn_claude_process(app, cmd, options.prompt.clone(), model, project_path).await
+    let result = spawn_claude_process(app.clone(), cmd, options.prompt.clone(), model, project_path).await;
+
+    // Debug logging - response (non-blocking)
+    if let Some(debug_state) = app.try_state::<DebugState>() {
+        let duration = start.elapsed().as_millis() as u64;
+        if let Ok(logger) = debug_state.logger.try_lock() {
+            match &result {
+                Ok(()) => {
+                    logger.log_response(
+                        "execute_claude",
+                        &serde_json::json!({"status": "started"}),
+                        duration,
+                    );
+                }
+                Err(e) => {
+                    logger.log_error("execute_claude", e);
+                }
+            }
+        }
+    }
+
+    result
 }
 
 /// Cancel the currently running Claude Code execution
@@ -1546,17 +1615,16 @@ pub async fn cancel_claude_execution(
         log::warn!("No active Claude process found to cancel");
     }
 
-    // Always emit cancellation events for UI consistency
+    // Emit cancellation events
     if let Some(sid) = session_id {
-        let _ = app.emit(&format!("claude-cancelled:{}", sid), true);
+        emit_debug(&app, &format!("claude-cancelled:{}", sid), true);
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        let _ = app.emit(&format!("claude-complete:{}", sid), false);
+        emit_debug(&app, &format!("claude-complete:{}", sid), false);
     }
-
-    // Also emit generic events for backward compatibility
-    let _ = app.emit("claude-cancelled", true);
+    // Also emit to generic events for backward compatibility
+    emit_debug(&app, "claude-cancelled", true);
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    let _ = app.emit("claude-complete", false);
+    emit_debug(&app, "claude-complete", false);
 
     if killed {
         log::info!("Claude process cancellation completed successfully");
@@ -1683,12 +1751,12 @@ async fn spawn_claude_process(
                 let _ = registry_clone.append_live_output(run_id, &line);
             }
 
-            // Emit the line to the frontend with session isolation if we have session ID
+            // Emit the line to the frontend
             if let Some(ref session_id) = *session_id_holder_clone.lock().unwrap() {
-                let _ = app_handle.emit(&format!("claude-output:{}", session_id), &line);
+                emit_debug_str(&app_handle, &format!("claude-output:{}", session_id), &line);
             }
             // Also emit to the generic event for backward compatibility
-            let _ = app_handle.emit("claude-output", &line);
+            emit_debug_str(&app_handle, "claude-output", &line);
         }
     });
 
@@ -1698,12 +1766,12 @@ async fn spawn_claude_process(
         let mut lines = stderr_reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
             log::error!("Claude stderr: {}", line);
-            // Emit error lines to the frontend with session isolation if we have session ID
+            // Emit error lines to the frontend
             if let Some(ref session_id) = *session_id_holder_clone2.lock().unwrap() {
-                let _ = app_handle_stderr.emit(&format!("claude-error:{}", session_id), &line);
+                emit_debug_str(&app_handle_stderr, &format!("claude-error:{}", session_id), &line);
             }
             // Also emit to the generic event for backward compatibility
-            let _ = app_handle_stderr.emit("claude-error", &line);
+            emit_debug_str(&app_handle_stderr, "claude-error", &line);
         }
     });
 
@@ -1725,23 +1793,31 @@ async fn spawn_claude_process(
                     log::info!("Claude process exited with status: {}", status);
                     // Add a small delay to ensure all messages are processed
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    // Emit completion event
                     if let Some(ref session_id) = *session_id_holder_clone3.lock().unwrap() {
-                        let _ = app_handle_wait
-                            .emit(&format!("claude-complete:{}", session_id), status.success());
+                        emit_debug(
+                            &app_handle_wait,
+                            &format!("claude-complete:{}", session_id),
+                            status.success(),
+                        );
                     }
                     // Also emit to the generic event for backward compatibility
-                    let _ = app_handle_wait.emit("claude-complete", status.success());
+                    emit_debug(&app_handle_wait, "claude-complete", status.success());
                 }
                 Err(e) => {
                     log::error!("Failed to wait for Claude process: {}", e);
                     // Add a small delay to ensure all messages are processed
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    // Emit completion event
                     if let Some(ref session_id) = *session_id_holder_clone3.lock().unwrap() {
-                        let _ =
-                            app_handle_wait.emit(&format!("claude-complete:{}", session_id), false);
+                        emit_debug(
+                            &app_handle_wait,
+                            &format!("claude-complete:{}", session_id),
+                            false,
+                        );
                     }
                     // Also emit to the generic event for backward compatibility
-                    let _ = app_handle_wait.emit("claude-complete", false);
+                    emit_debug(&app_handle_wait, "claude-complete", false);
                 }
             }
         }
