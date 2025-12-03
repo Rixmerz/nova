@@ -18,7 +18,7 @@ impl TmuxSession {
     /// Create a new tmux session with a named pipe for output
     ///
     /// # Arguments
-    /// * `name` - Name of the tmux session (e.g., "opcode-debug")
+    /// * `name` - Name of the tmux session (e.g., "nova-debug")
     ///
     /// # Returns
     /// A new TmuxSession instance or an error message

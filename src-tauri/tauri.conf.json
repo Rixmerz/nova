@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "opcode",
+  "productName": "Nova",
   "version": "0.2.1",
-  "identifier": "opcode.asterisk.so",
+  "identifier": "com.rixmerz.nova",
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "bun run build",
@@ -12,7 +12,7 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "opcode",
+        "title": "Nova",
         "width": 800,
         "height": 600,
         "decorations": false,
@@ -76,8 +76,8 @@
     "externalBin": [],
     "copyright": "© 2025 Asterisk. All rights reserved.",
     "category": "DeveloperTool",
-    "shortDescription": "GUI app and Toolkit for Claude Code",
-    "longDescription": "opcode is a comprehensive GUI application and toolkit for working with Claude Code, providing an intuitive interface for AI-assisted development.",
+    "shortDescription": "AI Workflow Marketplace - Create, Share & Monetize AI Flows",
+    "longDescription": "Nova is a marketplace for AI workflows. Create custom flows with LangChain and LangGraph, share them with the community, and monetize your creations.",
     "linux": {
       "appimage": {
         "bundleMediaFramework": true

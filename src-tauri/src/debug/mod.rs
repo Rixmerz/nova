@@ -1,16 +1,16 @@
-//! Debug mode module for opcode
+//! Debug mode module for Nova
 //!
 //! Provides a tmux-based debugging proxy that logs all communication
 //! between the frontend and backend.
 //!
 //! # Activation
-//! Set environment variable `OPCODE_DEBUG=1` before starting the app.
+//! Set environment variable `NOVA_DEBUG=1` before starting the app.
 //!
 //! # Usage
 //! ```bash
-//! OPCODE_DEBUG=1 cargo tauri dev
+//! NOVA_DEBUG=1 cargo tauri dev
 //! # In another terminal:
-//! tmux attach -t opcode-debug
+//! tmux attach -t nova-debug
 //! ```
 
 pub mod logger;
@@ -36,12 +36,12 @@ impl DebugState {
     }
 }
 
-/// Check if debug mode is enabled via OPCODE_DEBUG environment variable
+/// Check if debug mode is enabled via NOVA_DEBUG environment variable
 pub fn is_debug_enabled() -> bool {
-    std::env::var("OPCODE_DEBUG")
+    std::env::var("NOVA_DEBUG")
         .map(|v| v == "1" || v.to_lowercase() == "true")
         .unwrap_or(false)
 }
 
 /// Default session name for debug mode
-pub const DEBUG_SESSION_NAME: &str = "opcode-debug";
+pub const DEBUG_SESSION_NAME: &str = "nova-debug";

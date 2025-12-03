@@ -5,8 +5,8 @@
 
 import { api, type Session } from '@/lib/api';
 
-const STORAGE_KEY_PREFIX = 'opcode_session_';
-const SESSION_INDEX_KEY = 'opcode_session_index';
+const STORAGE_KEY_PREFIX = 'nova_session_';
+const SESSION_INDEX_KEY = 'nova_session_index';
 
 export interface SessionRestoreData {
   sessionId: string;

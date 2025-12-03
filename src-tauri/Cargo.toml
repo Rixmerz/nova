@@ -1,24 +1,24 @@
 [package]
-name = "opcode"
+name = "nova"
 version = "0.2.1"
-description = "GUI app and Toolkit for Claude Code"
+description = "AI Workflow Marketplace - Create, Share & Monetize AI Flows"
 authors = ["mufeedvh", "123vviekr"]
 license = "AGPL-3.0"
 edition = "2021"
-default-run = "opcode"
+default-run = "nova"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [[bin]]
-name = "opcode"
+name = "nova"
 path = "src/main.rs"
 
 [lib]
-name = "opcode_lib"
+name = "nova_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [[bin]]
-name = "opcode-web"
+name = "nova-web"
 path = "src/web_main.rs"
 
 [build-dependencies]
