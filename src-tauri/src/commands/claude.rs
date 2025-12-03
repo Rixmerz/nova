@@ -1615,16 +1615,16 @@ pub async fn cancel_claude_execution(
         log::warn!("No active Claude process found to cancel");
     }
 
-    // Emit cancellation events
-    if let Some(sid) = session_id {
-        emit_debug(&app, &format!("claude-cancelled:{}", sid), true);
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        emit_debug(&app, &format!("claude-complete:{}", sid), false);
-    }
-    // Also emit to generic events for backward compatibility
+    // DUAL CHANNEL: Emit to both generic and session-specific channels
     emit_debug(&app, "claude-cancelled", true);
+    if let Some(ref sid) = session_id {
+        emit_debug(&app, &format!("claude-cancelled:{}", sid), true);
+    }
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     emit_debug(&app, "claude-complete", false);
+    if let Some(ref sid) = session_id {
+        emit_debug(&app, &format!("claude-complete:{}", sid), false);
+    }
 
     if killed {
         log::info!("Claude process cancellation completed successfully");
@@ -1751,12 +1751,14 @@ async fn spawn_claude_process(
                 let _ = registry_clone.append_live_output(run_id, &line);
             }
 
-            // Emit the line to the frontend
+            // DUAL CHANNEL: Emit to both generic and session-specific channels
+            // Generic channel catches early messages before session_id is known
+            // Session-specific channel allows filtered listening per session
+            // Frontend deduplicates via UUID (processedUuidsRef)
+            emit_debug_str(&app_handle, "claude-output", &line);
             if let Some(ref session_id) = *session_id_holder_clone.lock().unwrap() {
                 emit_debug_str(&app_handle, &format!("claude-output:{}", session_id), &line);
             }
-            // Also emit to the generic event for backward compatibility
-            emit_debug_str(&app_handle, "claude-output", &line);
         }
     });
 
@@ -1766,12 +1768,11 @@ async fn spawn_claude_process(
         let mut lines = stderr_reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
             log::error!("Claude stderr: {}", line);
-            // Emit error lines to the frontend
+            // DUAL CHANNEL: Emit to both generic and session-specific channels
+            emit_debug_str(&app_handle_stderr, "claude-error", &line);
             if let Some(ref session_id) = *session_id_holder_clone2.lock().unwrap() {
                 emit_debug_str(&app_handle_stderr, &format!("claude-error:{}", session_id), &line);
             }
-            // Also emit to the generic event for backward compatibility
-            emit_debug_str(&app_handle_stderr, "claude-error", &line);
         }
     });
 
@@ -1793,31 +1794,21 @@ async fn spawn_claude_process(
                     log::info!("Claude process exited with status: {}", status);
                     // Add a small delay to ensure all messages are processed
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    // Emit completion event
-                    if let Some(ref session_id) = *session_id_holder_clone3.lock().unwrap() {
-                        emit_debug(
-                            &app_handle_wait,
-                            &format!("claude-complete:{}", session_id),
-                            status.success(),
-                        );
-                    }
-                    // Also emit to the generic event for backward compatibility
+                    // DUAL CHANNEL: Emit to both generic and session-specific channels
                     emit_debug(&app_handle_wait, "claude-complete", status.success());
+                    if let Some(ref session_id) = *session_id_holder_clone3.lock().unwrap() {
+                        emit_debug(&app_handle_wait, &format!("claude-complete:{}", session_id), status.success());
+                    }
                 }
                 Err(e) => {
                     log::error!("Failed to wait for Claude process: {}", e);
                     // Add a small delay to ensure all messages are processed
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    // Emit completion event
-                    if let Some(ref session_id) = *session_id_holder_clone3.lock().unwrap() {
-                        emit_debug(
-                            &app_handle_wait,
-                            &format!("claude-complete:{}", session_id),
-                            false,
-                        );
-                    }
-                    // Also emit to the generic event for backward compatibility
+                    // DUAL CHANNEL: Emit to both generic and session-specific channels
                     emit_debug(&app_handle_wait, "claude-complete", false);
+                    if let Some(ref session_id) = *session_id_holder_clone3.lock().unwrap() {
+                        emit_debug(&app_handle_wait, &format!("claude-complete:{}", session_id), false);
+                    }
                 }
             }
         }

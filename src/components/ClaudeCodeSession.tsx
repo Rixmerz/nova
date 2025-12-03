@@ -510,43 +510,19 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
         //     generic ones to prevent duplicate handling.
         // --------------------------------------------------------------------
 
-        console.log('[ClaudeCodeSession] Setting up generic event listeners first');
+        console.log('[ClaudeCodeSession] Setting up generic event listeners');
 
         let currentSessionId: string | null = claudeSessionId || effectiveSession?.id || null;
 
-        // Helper to attach session-specific listeners **once we are sure**
-        const attachSessionSpecificListeners = async (sid: string) => {
-          console.log('[ClaudeCodeSession] Attaching session-specific listeners for', sid);
-
-          const specificOutputUnlisten = await listen(`claude-output:${sid}`, (evt: any) => {
-            handleStreamMessage(evt.payload);
-          });
-
-          const specificErrorUnlisten = await listen(`claude-error:${sid}`, (evt: any) => {
-            console.error('Claude error (scoped):', evt.payload);
-            setError(evt.payload);
-          });
-
-          const specificCompleteUnlisten = await listen(`claude-complete:${sid}`, (evt: any) => {
-            console.log('[ClaudeCodeSession] Received claude-complete (scoped):', evt.payload);
-            processComplete(evt.payload);
-          });
-
-          // Replace existing unlisten refs with these new ones (after cleaning up)
-          unlistenRefs.current.forEach((u) => u());
-          unlistenRefs.current = [specificOutputUnlisten, specificErrorUnlisten, specificCompleteUnlisten];
-        };
-
-        // Generic listeners (catch-all)
-        const genericOutputUnlisten = await listen('claude-output', async (event: any) => {
-          handleStreamMessage(event.payload);
-
-          // Attempt to extract session_id on the fly (for the very first init)
+        // Simple generic output listener - all messages come through here
+        // Deduplication by UUID handles any duplicate events
+        const outputUnlisten = await listen('claude-output', async (event: any) => {
+          // Attempt to extract session_id from init message
           try {
             const msg = JSON.parse(event.payload) as ClaudeStreamMessage;
             if (msg.type === 'system' && msg.subtype === 'init' && msg.session_id) {
               if (!currentSessionId || currentSessionId !== msg.session_id) {
-                console.log('[ClaudeCodeSession] Detected new session_id from generic listener:', msg.session_id);
+                console.log('[ClaudeCodeSession] Detected session_id:', msg.session_id);
                 currentSessionId = msg.session_id;
                 setClaudeSessionId(msg.session_id);
 
@@ -554,7 +530,7 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
                 if (!extractedSessionInfo) {
                   const projectId = projectPath.replace(/[^a-zA-Z0-9]/g, '-');
                   setExtractedSessionInfo({ sessionId: msg.session_id, projectId });
-                  
+
                   // Save session data for restoration
                   SessionPersistenceService.saveSession(
                     msg.session_id,
@@ -563,22 +539,27 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
                     messages.length
                   );
                 }
-
-                // Switch to session-specific listeners
-                await attachSessionSpecificListeners(msg.session_id);
               }
             }
           } catch {
             /* ignore parse errors */
           }
+
+          // Process all messages - deduplication happens in handleStreamMessage
+          handleStreamMessage(event.payload);
         });
+
+        unlistenRefs.current.push(outputUnlisten);
 
         // Helper to process any JSONL stream message string or object
         function handleStreamMessage(payload: string | ClaudeStreamMessage) {
           try {
-            // Don't process if component unmounted
-            if (!isMountedRef.current) return;
-            
+            // NOTE: We intentionally removed the isMountedRef check here because:
+            // 1. React StrictMode causes temporary unmount/remount cycles in dev
+            // 2. Tauri event listeners persist across these cycles
+            // 3. setState calls are safe even if component unmounts (React ignores them)
+            // 4. Refs (processedUuidsRef) persist across StrictMode cycles
+
             let message: ClaudeStreamMessage;
             let rawPayload: string;
             
@@ -788,8 +769,8 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
           processComplete(evt.payload);
         });
 
-        // Store the generic unlisteners for now; they may be replaced later.
-        unlistenRefs.current = [genericOutputUnlisten, genericErrorUnlisten, genericCompleteUnlisten];
+        // Store all unlisteners for cleanup
+        unlistenRefs.current.push(genericErrorUnlisten, genericCompleteUnlisten);
 
         // --------------------------------------------------------------------
         // 2️⃣  Auto-checkpoint logic moved after listener setup (unchanged)
@@ -1146,19 +1127,33 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
     }
   };
 
-  // Cleanup event listeners and track mount state
+  // Cleanup event listeners ONLY on unmount (empty deps = only runs on mount/unmount)
+  // IMPORTANT: Do NOT add effectiveSession to deps - it changes during session and would destroy listeners
   useEffect(() => {
     isMountedRef.current = true;
-    
+
     return () => {
       console.log('[ClaudeCodeSession] Component unmounting, cleaning up listeners');
       isMountedRef.current = false;
       isListeningRef.current = false;
-      
-      // Track session completion with engagement metrics
-      if (effectiveSession) {
+
+      // Clean up listeners
+      unlistenRefs.current.forEach(unlisten => unlisten());
+      unlistenRefs.current = [];
+    };
+  }, []); // Empty deps - only cleanup on actual unmount
+
+  // Track session completion and clear checkpoint manager (separate from listener cleanup)
+  // This can run when effectiveSession changes without destroying listeners
+  const effectiveSessionRef = useRef(effectiveSession);
+  effectiveSessionRef.current = effectiveSession;
+
+  useEffect(() => {
+    return () => {
+      const session = effectiveSessionRef.current;
+      if (session) {
         trackEvent.sessionCompleted();
-        
+
         // Track session engagement
         const sessionDuration = sessionStartTime.current ? Date.now() - sessionStartTime.current : 0;
         const messageCount = messages.filter(m => m.user_message).length;
@@ -1169,14 +1164,14 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
             tools.forEach((tool: any) => toolsUsed.add(tool.name));
           }
         });
-        
+
         // Calculate engagement score (0-100)
-        const engagementScore = Math.min(100, 
-          (messageCount * 10) + 
-          (toolsUsed.size * 5) + 
+        const engagementScore = Math.min(100,
+          (messageCount * 10) +
+          (toolsUsed.size * 5) +
           (sessionDuration > 300000 ? 20 : sessionDuration / 15000) // 5+ min session gets 20 points
         );
-        
+
         trackEvent.sessionEngagement({
           session_duration_ms: sessionDuration,
           messages_sent: messageCount,
@@ -1184,20 +1179,14 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
           files_modified: 0, // TODO: Track file modifications
           engagement_score: Math.round(engagementScore)
         });
-      }
-      
-      // Clean up listeners
-      unlistenRefs.current.forEach(unlisten => unlisten());
-      unlistenRefs.current = [];
-      
-      // Clear checkpoint manager when session ends
-      if (effectiveSession) {
-        api.clearCheckpointManager(effectiveSession.id).catch(err => {
+
+        // Clear checkpoint manager when session ends
+        api.clearCheckpointManager(session.id).catch(err => {
           console.error("Failed to clear checkpoint manager:", err);
         });
       }
     };
-  }, [effectiveSession, projectPath]);
+  }, []); // Empty deps - only track on unmount, use ref to get current session
 
   const messagesList = (
     <div
