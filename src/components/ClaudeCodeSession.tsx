@@ -15,38 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Popover } from "@/components/ui/popover";
 import { api, type Session } from "@/lib/api";
 import { cn } from "@/lib/utils";
-
-// Conditional imports for Tauri APIs
-let tauriListen: any;
-type UnlistenFn = () => void;
-
-try {
-  if (typeof window !== 'undefined' && window.__TAURI__) {
-    tauriListen = require("@tauri-apps/api/event").listen;
-  }
-} catch (e) {
-  console.log('[ClaudeCodeSession] Tauri APIs not available, using web mode');
-}
-
-// Web-compatible replacements
-const listen = tauriListen || ((eventName: string, callback: (event: any) => void) => {
-  console.log('[ClaudeCodeSession] Setting up DOM event listener for:', eventName);
-
-  // In web mode, listen for DOM events
-  const domEventHandler = (event: any) => {
-    console.log('[ClaudeCodeSession] DOM event received:', eventName, event.detail);
-    // Simulate Tauri event structure
-    callback({ payload: event.detail });
-  };
-
-  window.addEventListener(eventName, domEventHandler);
-
-  // Return unlisten function
-  return Promise.resolve(() => {
-    console.log('[ClaudeCodeSession] Removing DOM event listener for:', eventName);
-    window.removeEventListener(eventName, domEventHandler);
-  });
-});
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { StreamMessage } from "./StreamMessage";
 import { FloatingPromptInput, type FloatingPromptInputRef } from "./FloatingPromptInput";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -125,7 +94,7 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
   const [forkSessionName, setForkSessionName] = useState("");
   
   // Queued prompts state
-  const [queuedPrompts, setQueuedPrompts] = useState<Array<{ id: string; prompt: string; model: "sonnet" | "opus" }>>([]);
+  const [queuedPrompts, setQueuedPrompts] = useState<Array<{ id: string; prompt: string; model: "haiku" | "sonnet" | "opus" }>>([]);
   
   // New state for preview feature
   const [showPreview, setShowPreview] = useState(false);
@@ -141,12 +110,13 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
   const unlistenRefs = useRef<UnlistenFn[]>([]);
   const hasActiveSessionRef = useRef(false);
   const floatingPromptRef = useRef<FloatingPromptInputRef>(null);
-  const queuedPromptsRef = useRef<Array<{ id: string; prompt: string; model: "sonnet" | "opus" }>>([]);
+  const queuedPromptsRef = useRef<Array<{ id: string; prompt: string; model: "haiku" | "sonnet" | "opus" }>>([]);
   const isMountedRef = useRef(true);
   const isListeningRef = useRef(false);
   const sessionStartTime = useRef<number>(Date.now());
   const isIMEComposingRef = useRef(false);
-  
+  const processedUuidsRef = useRef<Set<string>>(new Set());
+
   // Session metrics state for enhanced analytics
   const sessionMetrics = useRef({
     firstMessageTime: null as number | null,
@@ -487,7 +457,7 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
 
   // Project path selection handled by parent tab controls
 
-  const handleSendPrompt = async (prompt: string, model: "sonnet" | "opus") => {
+  const handleSendPrompt = async (prompt: string, model: "haiku" | "sonnet" | "opus") => {
     console.log('[ClaudeCodeSession] handleSendPrompt called with:', { prompt, model, projectPath, claudeSessionId, effectiveSession });
     
     if (!projectPath) {
@@ -510,7 +480,9 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
       setIsLoading(true);
       setError(null);
       hasActiveSessionRef.current = true;
-      
+      // Clear processed UUIDs for new message stream (prevents false-positive deduplication)
+      processedUuidsRef.current.clear();
+
       // For resuming sessions, ensure we have the session ID
       if (effectiveSession && !claudeSessionId) {
         setClaudeSessionId(effectiveSession.id);
@@ -538,43 +510,19 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
         //     generic ones to prevent duplicate handling.
         // --------------------------------------------------------------------
 
-        console.log('[ClaudeCodeSession] Setting up generic event listeners first');
+        console.log('[ClaudeCodeSession] Setting up generic event listeners');
 
         let currentSessionId: string | null = claudeSessionId || effectiveSession?.id || null;
 
-        // Helper to attach session-specific listeners **once we are sure**
-        const attachSessionSpecificListeners = async (sid: string) => {
-          console.log('[ClaudeCodeSession] Attaching session-specific listeners for', sid);
-
-          const specificOutputUnlisten = await listen(`claude-output:${sid}`, (evt: any) => {
-            handleStreamMessage(evt.payload);
-          });
-
-          const specificErrorUnlisten = await listen(`claude-error:${sid}`, (evt: any) => {
-            console.error('Claude error (scoped):', evt.payload);
-            setError(evt.payload);
-          });
-
-          const specificCompleteUnlisten = await listen(`claude-complete:${sid}`, (evt: any) => {
-            console.log('[ClaudeCodeSession] Received claude-complete (scoped):', evt.payload);
-            processComplete(evt.payload);
-          });
-
-          // Replace existing unlisten refs with these new ones (after cleaning up)
-          unlistenRefs.current.forEach((u) => u());
-          unlistenRefs.current = [specificOutputUnlisten, specificErrorUnlisten, specificCompleteUnlisten];
-        };
-
-        // Generic listeners (catch-all)
-        const genericOutputUnlisten = await listen('claude-output', async (event: any) => {
-          handleStreamMessage(event.payload);
-
-          // Attempt to extract session_id on the fly (for the very first init)
+        // Simple generic output listener - all messages come through here
+        // Deduplication by UUID handles any duplicate events
+        const outputUnlisten = await listen('claude-output', async (event: any) => {
+          // Attempt to extract session_id from init message
           try {
             const msg = JSON.parse(event.payload) as ClaudeStreamMessage;
             if (msg.type === 'system' && msg.subtype === 'init' && msg.session_id) {
               if (!currentSessionId || currentSessionId !== msg.session_id) {
-                console.log('[ClaudeCodeSession] Detected new session_id from generic listener:', msg.session_id);
+                console.log('[ClaudeCodeSession] Detected session_id:', msg.session_id);
                 currentSessionId = msg.session_id;
                 setClaudeSessionId(msg.session_id);
 
@@ -582,7 +530,7 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
                 if (!extractedSessionInfo) {
                   const projectId = projectPath.replace(/[^a-zA-Z0-9]/g, '-');
                   setExtractedSessionInfo({ sessionId: msg.session_id, projectId });
-                  
+
                   // Save session data for restoration
                   SessionPersistenceService.saveSession(
                     msg.session_id,
@@ -591,22 +539,27 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
                     messages.length
                   );
                 }
-
-                // Switch to session-specific listeners
-                await attachSessionSpecificListeners(msg.session_id);
               }
             }
           } catch {
             /* ignore parse errors */
           }
+
+          // Process all messages - deduplication happens in handleStreamMessage
+          handleStreamMessage(event.payload);
         });
+
+        unlistenRefs.current.push(outputUnlisten);
 
         // Helper to process any JSONL stream message string or object
         function handleStreamMessage(payload: string | ClaudeStreamMessage) {
           try {
-            // Don't process if component unmounted
-            if (!isMountedRef.current) return;
-            
+            // NOTE: We intentionally removed the isMountedRef check here because:
+            // 1. React StrictMode causes temporary unmount/remount cycles in dev
+            // 2. Tauri event listeners persist across these cycles
+            // 3. setState calls are safe even if component unmounts (React ignores them)
+            // 4. Refs (processedUuidsRef) persist across StrictMode cycles
+
             let message: ClaudeStreamMessage;
             let rawPayload: string;
             
@@ -619,7 +572,16 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
               message = payload;
               rawPayload = JSON.stringify(payload);
             }
-            
+
+            // Deduplicate by UUID to prevent double-processing from generic + session-specific events
+            if (message.uuid && processedUuidsRef.current.has(message.uuid)) {
+              console.log('[ClaudeCodeSession] Skipping duplicate message:', message.uuid);
+              return;
+            }
+            if (message.uuid) {
+              processedUuidsRef.current.add(message.uuid);
+            }
+
             console.log('[ClaudeCodeSession] handleStreamMessage - message type:', message.type);
 
             // Store raw JSONL
@@ -807,8 +769,8 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
           processComplete(evt.payload);
         });
 
-        // Store the generic unlisteners for now; they may be replaced later.
-        unlistenRefs.current = [genericOutputUnlisten, genericErrorUnlisten, genericCompleteUnlisten];
+        // Store all unlisteners for cleanup
+        unlistenRefs.current.push(genericErrorUnlisten, genericCompleteUnlisten);
 
         // --------------------------------------------------------------------
         // 2️⃣  Auto-checkpoint logic moved after listener setup (unchanged)
@@ -1165,19 +1127,33 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
     }
   };
 
-  // Cleanup event listeners and track mount state
+  // Cleanup event listeners ONLY on unmount (empty deps = only runs on mount/unmount)
+  // IMPORTANT: Do NOT add effectiveSession to deps - it changes during session and would destroy listeners
   useEffect(() => {
     isMountedRef.current = true;
-    
+
     return () => {
       console.log('[ClaudeCodeSession] Component unmounting, cleaning up listeners');
       isMountedRef.current = false;
       isListeningRef.current = false;
-      
-      // Track session completion with engagement metrics
-      if (effectiveSession) {
+
+      // Clean up listeners
+      unlistenRefs.current.forEach(unlisten => unlisten());
+      unlistenRefs.current = [];
+    };
+  }, []); // Empty deps - only cleanup on actual unmount
+
+  // Track session completion and clear checkpoint manager (separate from listener cleanup)
+  // This can run when effectiveSession changes without destroying listeners
+  const effectiveSessionRef = useRef(effectiveSession);
+  effectiveSessionRef.current = effectiveSession;
+
+  useEffect(() => {
+    return () => {
+      const session = effectiveSessionRef.current;
+      if (session) {
         trackEvent.sessionCompleted();
-        
+
         // Track session engagement
         const sessionDuration = sessionStartTime.current ? Date.now() - sessionStartTime.current : 0;
         const messageCount = messages.filter(m => m.user_message).length;
@@ -1188,14 +1164,14 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
             tools.forEach((tool: any) => toolsUsed.add(tool.name));
           }
         });
-        
+
         // Calculate engagement score (0-100)
-        const engagementScore = Math.min(100, 
-          (messageCount * 10) + 
-          (toolsUsed.size * 5) + 
+        const engagementScore = Math.min(100,
+          (messageCount * 10) +
+          (toolsUsed.size * 5) +
           (sessionDuration > 300000 ? 20 : sessionDuration / 15000) // 5+ min session gets 20 points
         );
-        
+
         trackEvent.sessionEngagement({
           session_duration_ms: sessionDuration,
           messages_sent: messageCount,
@@ -1203,20 +1179,14 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
           files_modified: 0, // TODO: Track file modifications
           engagement_score: Math.round(engagementScore)
         });
-      }
-      
-      // Clean up listeners
-      unlistenRefs.current.forEach(unlisten => unlisten());
-      unlistenRefs.current = [];
-      
-      // Clear checkpoint manager when session ends
-      if (effectiveSession) {
-        api.clearCheckpointManager(effectiveSession.id).catch(err => {
+
+        // Clear checkpoint manager when session ends
+        api.clearCheckpointManager(session.id).catch(err => {
           console.error("Failed to clear checkpoint manager:", err);
         });
       }
     };
-  }, [effectiveSession, projectPath]);
+  }, []); // Empty deps - only track on unmount, use ref to get current session
 
   const messagesList = (
     <div

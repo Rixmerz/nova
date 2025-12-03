@@ -635,77 +635,30 @@ const StreamMessageComponent: React.FC<StreamMessageProps> = ({ message, classNa
       return renderedCard;
     }
 
-    // Result message - render with markdown
+    // Result message - only show if there's an error, otherwise skip
+    // (successful completion metadata is redundant after showing assistant messages)
     if (message.type === "result") {
       const isError = message.is_error || message.subtype?.includes("error");
-      
+
+      // Don't show "Execution Complete" card - it's redundant
+      // Only show if there's an actual error to display
+      if (!isError) {
+        return null;
+      }
+
       return (
         <Card className={cn(
-          isError ? "border-destructive/20 bg-destructive/5" : "border-green-500/20 bg-green-500/5",
+          "border-destructive/20 bg-destructive/5",
           className
         )}>
           <CardContent className="p-4">
             <div className="flex items-start gap-3">
-              {isError ? (
-                <AlertCircle className="h-5 w-5 text-destructive mt-0.5" />
-              ) : (
-                <CheckCircle2 className="h-5 w-5 text-green-500 mt-0.5" />
-              )}
+              <AlertCircle className="h-5 w-5 text-destructive mt-0.5" />
               <div className="flex-1 space-y-2">
-                <h4 className="font-semibold text-sm">
-                  {isError ? "Execution Failed" : "Execution Complete"}
-                </h4>
-                
-                {message.result && (
-                  <div className="prose prose-sm dark:prose-invert max-w-none">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      components={{
-                        code({ node, inline, className, children, ...props }: any) {
-                          const match = /language-(\w+)/.exec(className || '');
-                          return !inline && match ? (
-                            <SyntaxHighlighter
-                              style={syntaxTheme}
-                              language={match[1]}
-                              PreTag="div"
-                              {...props}
-                            >
-                              {String(children).replace(/\n$/, '')}
-                            </SyntaxHighlighter>
-                          ) : (
-                            <code className={className} {...props}>
-                              {children}
-                            </code>
-                          );
-                        }
-                      }}
-                    >
-                      {message.result}
-                    </ReactMarkdown>
-                  </div>
-                )}
-                
+                <h4 className="font-semibold text-sm">Execution Failed</h4>
                 {message.error && (
                   <div className="text-sm text-destructive">{message.error}</div>
                 )}
-                
-                <div className="text-xs text-muted-foreground space-y-1 mt-2">
-                  {(message.cost_usd !== undefined || message.total_cost_usd !== undefined) && (
-                    <div>Cost: ${((message.cost_usd || message.total_cost_usd)!).toFixed(4)} USD</div>
-                  )}
-                  {message.duration_ms !== undefined && (
-                    <div>Duration: {(message.duration_ms / 1000).toFixed(2)}s</div>
-                  )}
-                  {message.num_turns !== undefined && (
-                    <div>Turns: {message.num_turns}</div>
-                  )}
-                  {message.usage && (
-                    <div>
-                      Total tokens: {message.usage.input_tokens + message.usage.output_tokens} 
-                      ({message.usage.input_tokens} in, {message.usage.output_tokens} out)
-                    </div>
-                  )}
-                </div>
               </div>
             </div>
           </CardContent>

@@ -5,19 +5,17 @@ import {
   Maximize2,
   Minimize2,
   ChevronUp,
-  Sparkles,
   Zap,
   Square,
-  Brain,
-  Lightbulb,
-  Cpu,
-  Rocket,
-  
+  Feather,
+  Sparkles,
+  Crown,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Popover } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
 import { TooltipProvider, TooltipSimple, Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip-modern";
 import { FilePicker } from "./FilePicker";
 import { SlashCommandPicker } from "./SlashCommandPicker";
@@ -41,7 +39,7 @@ interface FloatingPromptInputProps {
   /**
    * Callback when prompt is sent
    */
-  onSend: (prompt: string, model: "sonnet" | "opus") => void;
+  onSend: (prompt: string, model: "haiku" | "sonnet" | "opus") => void;
   /**
    * Whether the input is loading
    */
@@ -53,7 +51,7 @@ interface FloatingPromptInputProps {
   /**
    * Default model to select
    */
-  defaultModel?: "sonnet" | "opus";
+  defaultModel?: "haiku" | "sonnet" | "opus";
   /**
    * Project path for file picker
    */
@@ -76,104 +74,8 @@ export interface FloatingPromptInputRef {
   addImage: (imagePath: string) => void;
 }
 
-/**
- * Thinking mode type definition
- */
-type ThinkingMode = "auto" | "think" | "think_hard" | "think_harder" | "ultrathink";
-
-/**
- * Thinking mode configuration
- */
-type ThinkingModeConfig = {
-  id: ThinkingMode;
-  name: string;
-  description: string;
-  level: number; // 0-4 for visual indicator
-  phrase?: string; // The phrase to append
-  icon: React.ReactNode;
-  color: string;
-  shortName: string;
-};
-
-const THINKING_MODES: ThinkingModeConfig[] = [
-  {
-    id: "auto",
-    name: "Auto",
-    description: "Let Claude decide",
-    level: 0,
-    icon: <Sparkles className="h-3.5 w-3.5" />,
-    color: "text-muted-foreground",
-    shortName: "A"
-  },
-  {
-    id: "think",
-    name: "Think",
-    description: "Basic reasoning",
-    level: 1,
-    phrase: "think",
-    icon: <Lightbulb className="h-3.5 w-3.5" />,
-    color: "text-primary",
-    shortName: "T"
-  },
-  {
-    id: "think_hard",
-    name: "Think Hard",
-    description: "Deeper analysis",
-    level: 2,
-    phrase: "think hard",
-    icon: <Brain className="h-3.5 w-3.5" />,
-    color: "text-primary",
-    shortName: "T+"
-  },
-  {
-    id: "think_harder",
-    name: "Think Harder",
-    description: "Extensive reasoning",
-    level: 3,
-    phrase: "think harder",
-    icon: <Cpu className="h-3.5 w-3.5" />,
-    color: "text-primary",
-    shortName: "T++"
-  },
-  {
-    id: "ultrathink",
-    name: "Ultrathink",
-    description: "Maximum computation",
-    level: 4,
-    phrase: "ultrathink",
-    icon: <Rocket className="h-3.5 w-3.5" />,
-    color: "text-primary",
-    shortName: "Ultra"
-  }
-];
-
-/**
- * ThinkingModeIndicator component - Shows visual indicator bars for thinking level
- */
-const ThinkingModeIndicator: React.FC<{ level: number; color?: string }> = ({ level, color: _color }) => {
-  const getBarColor = (barIndex: number) => {
-    if (barIndex > level) return "bg-muted";
-    return "bg-primary";
-  };
-  
-  return (
-    <div className="flex items-center gap-0.5">
-      {[1, 2, 3, 4].map((i) => (
-        <div
-          key={i}
-          className={cn(
-            "w-1 h-3 rounded-full transition-all duration-200",
-            getBarColor(i),
-            i <= level && "shadow-sm"
-          )}
-        />
-      ))}
-    </div>
-  );
-};
-
 type Model = {
-  id: "sonnet" | "opus";
+  id: "haiku" | "sonnet" | "opus";
   name: string;
   description: string;
   icon: React.ReactNode;
@@ -183,20 +85,28 @@ type Model = {
 
 const MODELS: Model[] = [
   {
+    id: "haiku",
+    name: "Claude Haiku",
+    description: "Fastest, ideal for simple tasks",
+    icon: <Feather className="h-3.5 w-3.5" />,
+    shortName: "H",
+    color: "text-green-500"
+  },
+  {
     id: "sonnet",
-    name: "Claude 4 Sonnet",
-    description: "Faster, efficient for most tasks",
-    icon: <Zap className="h-3.5 w-3.5" />,
+    name: "Claude Sonnet",
+    description: "Balanced speed and capability",
+    icon: <Sparkles className="h-3.5 w-3.5" />,
     shortName: "S",
     color: "text-primary"
   },
   {
     id: "opus",
-    name: "Claude 4 Opus",
-    description: "More capable, better for complex tasks",
-    icon: <Zap className="h-3.5 w-3.5" />,
+    name: "Claude Opus",
+    description: "Most capable, for complex tasks",
+    icon: <Crown className="h-3.5 w-3.5" />,
     shortName: "O",
-    color: "text-primary"
+    color: "text-amber-500"
   }
 ];
 
@@ -225,11 +135,10 @@ const FloatingPromptInputInner = (
   ref: React.Ref<FloatingPromptInputRef>,
 ) => {
   const [prompt, setPrompt] = useState("");
-  const [selectedModel, setSelectedModel] = useState<"sonnet" | "opus">(defaultModel);
-  const [selectedThinkingMode, setSelectedThinkingMode] = useState<ThinkingMode>("auto");
+  const [selectedModel, setSelectedModel] = useState<"haiku" | "sonnet" | "opus">(defaultModel);
+  const [ultrathinkEnabled, setUltrathinkEnabled] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
-  const [thinkingModePickerOpen, setThinkingModePickerOpen] = useState(false);
   const [showFilePicker, setShowFilePicker] = useState(false);
   const [filePickerQuery, setFilePickerQuery] = useState("");
   const [showSlashCommandPicker, setShowSlashCommandPicker] = useState(false);
@@ -371,57 +280,71 @@ const FloatingPromptInputInner = (
         }
 
         const webview = getCurrentWebviewWindow();
-        unlistenDragDropRef.current = await webview.onDragDropEvent((event: any) => {
-          if (event.payload.type === 'enter' || event.payload.type === 'over') {
-            setDragActive(true);
-          } else if (event.payload.type === 'leave') {
-            setDragActive(false);
-          } else if (event.payload.type === 'drop' && event.payload.paths) {
-            setDragActive(false);
 
-            const currentTime = Date.now();
-            if (currentTime - lastDropTime < 200) {
-              // This debounce is crucial to handle the storm of drop events
-              // that Tauri/OS can fire for a single user action.
-              return;
-            }
-            lastDropTime = currentTime;
-
-            const droppedPaths = event.payload.paths as string[];
-            const imagePaths = droppedPaths.filter(isImageFile);
-
-            if (imagePaths.length > 0) {
-              setPrompt(currentPrompt => {
-                const existingPaths = extractImagePaths(currentPrompt);
-                const newPaths = imagePaths.filter(p => !existingPaths.includes(p));
-
-                if (newPaths.length === 0) {
-                  return currentPrompt; // All dropped images are already in the prompt
-                }
-
-                // Wrap paths with spaces in quotes for clarity
-                const mentionsToAdd = newPaths.map(p => {
-                  // If path contains spaces, wrap in quotes
-                  if (p.includes(' ')) {
-                    return `@"${p}"`;
-                  }
-                  return `@${p}`;
-                }).join(' ');
-                const newPrompt = currentPrompt + (currentPrompt.endsWith(' ') || currentPrompt === '' ? '' : ' ') + mentionsToAdd + ' ';
-
-                setTimeout(() => {
-                  const target = isExpanded ? expandedTextareaRef.current : textareaRef.current;
-                  target?.focus();
-                  target?.setSelectionRange(newPrompt.length, newPrompt.length);
-                }, 0);
-
-                return newPrompt;
-              });
-            }
-          }
-        });
+        // Check if the new Tauri v2 API method exists, otherwise try the listen API
+        if (typeof webview.onDragDropEvent === 'function') {
+          unlistenDragDropRef.current = await webview.onDragDropEvent((event: any) => {
+            handleDragDropEvent(event);
+          });
+        } else {
+          // Fallback: Use the event listener API for Tauri v2
+          const { listen } = await import("@tauri-apps/api/event");
+          unlistenDragDropRef.current = await listen('tauri://drag-drop', (event: any) => {
+            handleDragDropEvent(event);
+          });
+        }
       } catch (error) {
-        console.error('Failed to set up Tauri drag-drop listener:', error);
+        console.warn('[FloatingPromptInput] Drag-drop listener not available, feature disabled:', error);
+      }
+    };
+
+    const handleDragDropEvent = (event: any) => {
+      if (event.payload.type === 'enter' || event.payload.type === 'over') {
+        setDragActive(true);
+      } else if (event.payload.type === 'leave') {
+        setDragActive(false);
+      } else if (event.payload.type === 'drop' && event.payload.paths) {
+        setDragActive(false);
+
+        const currentTime = Date.now();
+        if (currentTime - lastDropTime < 200) {
+          // This debounce is crucial to handle the storm of drop events
+          // that Tauri/OS can fire for a single user action.
+          return;
+        }
+        lastDropTime = currentTime;
+
+        const droppedPaths = event.payload.paths as string[];
+        const imagePaths = droppedPaths.filter(isImageFile);
+
+        if (imagePaths.length > 0) {
+          setPrompt(currentPrompt => {
+            const existingPaths = extractImagePaths(currentPrompt);
+            const newPaths = imagePaths.filter(p => !existingPaths.includes(p));
+
+            if (newPaths.length === 0) {
+              return currentPrompt; // All dropped images are already in the prompt
+            }
+
+            // Wrap paths with spaces in quotes for clarity
+            const mentionsToAdd = newPaths.map(p => {
+              // If path contains spaces, wrap in quotes
+              if (p.includes(' ')) {
+                return `@"${p}"`;
+              }
+              return `@${p}`;
+            }).join(' ');
+            const newPrompt = currentPrompt + (currentPrompt.endsWith(' ') || currentPrompt === '' ? '' : ' ') + mentionsToAdd + ' ';
+
+            setTimeout(() => {
+              const target = isExpanded ? expandedTextareaRef.current : textareaRef.current;
+              target?.focus();
+              target?.setSelectionRange(newPrompt.length, newPrompt.length);
+            }, 0);
+
+            return newPrompt;
+          });
+        }
       }
     };
 
@@ -700,10 +623,9 @@ const FloatingPromptInputInner = (
     if (prompt.trim() && !disabled) {
       let finalPrompt = prompt.trim();
 
-      // Append thinking phrase if not auto mode
-      const thinkingMode = THINKING_MODES.find(m => m.id === selectedThinkingMode);
-      if (thinkingMode && thinkingMode.phrase) {
-        finalPrompt = `${finalPrompt}.\n\n${thinkingMode.phrase}.`;
+      // Append ultrathink phrase if enabled
+      if (ultrathinkEnabled) {
+        finalPrompt = `${finalPrompt}.\n\nultrathink.`;
       }
 
       onSend(finalPrompt, selectedModel);
@@ -967,67 +889,23 @@ const FloatingPromptInputInner = (
                   </div>
 
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground">Thinking:</span>
-                    <Popover
-                      trigger={
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              variant="outline"
-                                size="sm"
-                                onClick={() => setThinkingModePickerOpen(!thinkingModePickerOpen)}
-                                className="gap-2"
-                              >
-                                <span className={THINKING_MODES.find(m => m.id === selectedThinkingMode)?.color}>
-                                  {THINKING_MODES.find(m => m.id === selectedThinkingMode)?.icon}
-                                </span>
-                                <ThinkingModeIndicator 
-                                  level={THINKING_MODES.find(m => m.id === selectedThinkingMode)?.level || 0} 
-                                />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              <p className="font-medium">{THINKING_MODES.find(m => m.id === selectedThinkingMode)?.name || "Auto"}</p>
-                              <p className="text-xs text-muted-foreground">{THINKING_MODES.find(m => m.id === selectedThinkingMode)?.description}</p>
-                            </TooltipContent>
-                          </Tooltip>
-                      }
-                      content={
-                        <div className="w-[280px] p-1">
-                          {THINKING_MODES.map((mode) => (
-                            <button
-                              key={mode.id}
-                              onClick={() => {
-                                setSelectedThinkingMode(mode.id);
-                                setThinkingModePickerOpen(false);
-                              }}
-                              className={cn(
-                                "w-full flex items-start gap-3 p-3 rounded-md transition-colors text-left",
-                                "hover:bg-accent",
-                                selectedThinkingMode === mode.id && "bg-accent"
-                              )}
-                            >
-                              <span className={cn("mt-0.5", mode.color)}>
-                                {mode.icon}
-                              </span>
-                              <div className="flex-1 space-y-1">
-                                <div className="font-medium text-sm">
-                                  {mode.name}
-                                </div>
-                                <div className="text-xs text-muted-foreground">
-                                  {mode.description}
-                                </div>
-                              </div>
-                              <ThinkingModeIndicator level={mode.level} />
-                            </button>
-                          ))}
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground">Ultrathink:</span>
+                          <Switch
+                            checked={ultrathinkEnabled}
+                            onCheckedChange={setUltrathinkEnabled}
+                          />
                         </div>
-                      }
-                      open={thinkingModePickerOpen}
-                      onOpenChange={setThinkingModePickerOpen}
-                      align="start"
-                      side="top"
-                    />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="font-medium">{ultrathinkEnabled ? "Ultrathink enabled" : "Normal mode"}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {ultrathinkEnabled ? "Maximum reasoning depth" : "Standard response mode"}
+                        </p>
+                      </TooltipContent>
+                    </Tooltip>
                   </div>
                 </div>
 
@@ -1148,72 +1026,28 @@ const FloatingPromptInputInner = (
                 side="top"
               />
 
-                <Popover
-                  trigger={
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <motion.div
-                          whileTap={{ scale: 0.97 }}
-                            transition={{ duration: 0.15 }}
-                          >
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              disabled={disabled}
-                              className="h-9 px-2 hover:bg-accent/50 gap-1"
-                            >
-                              <span className={THINKING_MODES.find(m => m.id === selectedThinkingMode)?.color}>
-                                {THINKING_MODES.find(m => m.id === selectedThinkingMode)?.icon}
-                              </span>
-                              <span className="text-[10px] font-semibold opacity-70">
-                                {THINKING_MODES.find(m => m.id === selectedThinkingMode)?.shortName}
-                              </span>
-                              <ChevronUp className="h-3 w-3 ml-0.5 opacity-50" />
-                            </Button>
-                          </motion.div>
-                        </TooltipTrigger>
-                        <TooltipContent side="top">
-                          <p className="text-xs font-medium">Thinking: {THINKING_MODES.find(m => m.id === selectedThinkingMode)?.name || "Auto"}</p>
-                          <p className="text-xs text-muted-foreground">{THINKING_MODES.find(m => m.id === selectedThinkingMode)?.description}</p>
-                        </TooltipContent>
-                      </Tooltip>
-                  }
-                content={
-                  <div className="w-[280px] p-1">
-                    {THINKING_MODES.map((mode) => (
-                      <button
-                        key={mode.id}
-                        onClick={() => {
-                          setSelectedThinkingMode(mode.id);
-                          setThinkingModePickerOpen(false);
-                        }}
-                        className={cn(
-                          "w-full flex items-start gap-3 p-3 rounded-md transition-colors text-left",
-                          "hover:bg-accent",
-                          selectedThinkingMode === mode.id && "bg-accent"
-                        )}
-                      >
-                        <span className={cn("mt-0.5", mode.color)}>
-                          {mode.icon}
-                        </span>
-                        <div className="flex-1 space-y-1">
-                          <div className="font-medium text-sm">
-                            {mode.name}
-                          </div>
-                          <div className="text-xs text-muted-foreground">
-                            {mode.description}
-                          </div>
-                        </div>
-                        <ThinkingModeIndicator level={mode.level} />
-                      </button>
-                    ))}
-                  </div>
-                }
-                open={thinkingModePickerOpen}
-                onOpenChange={setThinkingModePickerOpen}
-                align="start"
-                side="top"
-              />
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <div className="flex items-center gap-1.5 h-9 px-2">
+                      <Zap className={cn(
+                        "h-3.5 w-3.5 transition-colors",
+                        ultrathinkEnabled ? "text-amber-500" : "text-muted-foreground"
+                      )} />
+                      <Switch
+                        checked={ultrathinkEnabled}
+                        onCheckedChange={setUltrathinkEnabled}
+                        disabled={disabled}
+                        className="scale-75"
+                      />
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    <p className="text-xs font-medium">{ultrathinkEnabled ? "Ultrathink enabled" : "Normal mode"}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {ultrathinkEnabled ? "Maximum reasoning depth" : "Toggle for deeper analysis"}
+                    </p>
+                  </TooltipContent>
+                </Tooltip>
 
               </div>
 

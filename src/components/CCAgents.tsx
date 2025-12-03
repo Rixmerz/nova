@@ -191,10 +191,10 @@ export const CCAgents: React.FC<CCAgentsProps> = ({ onBack, className }) => {
     try {
       // Show native save dialog
       const filePath = await save({
-        defaultPath: `${agent.name.toLowerCase().replace(/\s+/g, '-')}.opcode.json`,
+        defaultPath: `${agent.name.toLowerCase().replace(/\s+/g, '-')}.nova.json`,
         filters: [{
-          name: 'opcode Agent',
-          extensions: ['opcode.json']
+          name: 'Nova Agent',
+          extensions: ['nova.json']
         }]
       });
       
@@ -222,8 +222,8 @@ export const CCAgents: React.FC<CCAgentsProps> = ({ onBack, className }) => {
       const filePath = await open({
         multiple: false,
         filters: [{
-          name: 'opcode Agent',
-          extensions: ['opcode.json', 'json']
+          name: 'Nova Agent',
+          extensions: ['nova.json', 'json']
         }]
       });
       
@@ -439,7 +439,7 @@ export const CCAgents: React.FC<CCAgentsProps> = ({ onBack, className }) => {
                                   variant="ghost"
                                   onClick={() => handleExportAgent(agent)}
                                   className="flex items-center gap-1"
-                                  title="Export agent to .opcode.json"
+                                  title="Export agent to .nova.json"
                                 >
                                   <Upload className="h-3 w-3" />
                                   Export
