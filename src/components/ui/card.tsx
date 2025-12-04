@@ -25,14 +25,9 @@ const Card = React.forwardRef<
   <div
     ref={ref}
     className={cn(
-      "rounded-lg border shadow-xs",
+      "rounded-lg glass text-card-foreground shadow-sm",
       className
     )}
-    style={{
-      borderColor: "var(--color-border)",
-      backgroundColor: "var(--color-card)",
-      color: "var(--color-card-foreground)"
-    }}
     {...props}
   />
 ));

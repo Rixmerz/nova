@@ -196,7 +196,7 @@ export const SessionList: React.FC<SessionListProps> = ({
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.3, delay: 0.1 }}
-            className="flex justify-between items-center"
+            className="flex justify-between items-center bg-gradient-cosmic p-4 rounded-lg mb-4 glass-subtle"
           >
             <div className="flex items-center gap-4">
               <ClaudeMemoriesDropdown
@@ -256,8 +256,9 @@ export const SessionList: React.FC<SessionListProps> = ({
               >
                 <Card
                   className={cn(
-                    "p-3 hover:bg-accent/50 transition-all duration-200 cursor-pointer group h-full",
-                    session.todo_data && "bg-primary/5"
+                    "p-3 glass hover:glass-strong transition-all duration-300 cursor-pointer group h-full",
+                    "hover:glow-primary hover:scale-[1.02] hover:-translate-y-0.5",
+                    session.todo_data && "glow-accent"
                   )}
                   onClick={() => {
                     // Emit a special event for Claude Code session navigation
