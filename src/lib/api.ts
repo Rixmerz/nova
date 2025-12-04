@@ -503,6 +503,21 @@ export const api = {
   },
 
   /**
+   * Deletes a session and its associated files
+   * @param sessionId - The ID of the session to delete
+   * @param projectId - The ID of the project the session belongs to
+   * @returns Promise resolving when the session is deleted
+   */
+  async deleteSession(sessionId: string, projectId: string): Promise<void> {
+    try {
+      return await apiCall<void>('delete_session', { sessionId, projectId });
+    } catch (error) {
+      console.error("Failed to delete session:", error);
+      throw error;
+    }
+  },
+
+  /**
    * Fetch list of agents from GitHub repository
    * @returns Promise resolving to list of available agents on GitHub
    */

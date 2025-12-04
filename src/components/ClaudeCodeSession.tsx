@@ -526,8 +526,8 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
                 currentSessionId = msg.session_id;
                 setClaudeSessionId(msg.session_id);
 
-                // If we haven't extracted session info before, do it now
-                if (!extractedSessionInfo) {
+                // Always update extractedSessionInfo when session_id changes (fixes session duplication bug)
+                if (!extractedSessionInfo || extractedSessionInfo.sessionId !== msg.session_id) {
                   const projectId = projectPath.replace(/[^a-zA-Z0-9]/g, '-');
                   setExtractedSessionInfo({ sessionId: msg.session_id, projectId });
 
@@ -831,11 +831,13 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
         });
 
         // Execute the appropriate command
-        if (effectiveSession && !isFirstPrompt) {
-          console.log('[ClaudeCodeSession] Resuming session:', effectiveSession.id);
-          trackEvent.sessionResumed(effectiveSession.id);
+        // Use claudeSessionId directly (most reliable) or fall back to effectiveSession.id
+        const sessionIdToUse = claudeSessionId || effectiveSession?.id;
+        if (sessionIdToUse && !isFirstPrompt) {
+          console.log('[ClaudeCodeSession] Resuming session with ID:', sessionIdToUse);
+          trackEvent.sessionResumed(sessionIdToUse);
           trackEvent.modelSelected(model);
-          await api.resumeClaudeCode(projectPath, effectiveSession.id, prompt, model);
+          await api.resumeClaudeCode(projectPath, sessionIdToUse, prompt, model);
         } else {
           console.log('[ClaudeCodeSession] Starting new session');
           setIsFirstPrompt(false);

@@ -164,21 +164,28 @@ export const TabProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const removeTab = useCallback((id: string) => {
     setTabs(prevTabs => {
       const filteredTabs = prevTabs.filter(tab => tab.id !== id);
-      
+
       // Reorder remaining tabs
       const reorderedTabs = filteredTabs.map((tab, index) => ({
         ...tab,
         order: index
       }));
 
-      // Update active tab if necessary
+      // Calculate new active tab ID
+      let newActiveId = activeTabId;
       if (activeTabId === id && reorderedTabs.length > 0) {
         const removedTabIndex = prevTabs.findIndex(tab => tab.id === id);
         const newActiveIndex = Math.min(removedTabIndex, reorderedTabs.length - 1);
-        setActiveTabId(reorderedTabs[newActiveIndex].id);
+        newActiveId = reorderedTabs[newActiveIndex].id;
+        setActiveTabId(newActiveId);
       } else if (reorderedTabs.length === 0) {
+        newActiveId = null;
         setActiveTabId(null);
       }
+
+      // IMPORTANT: Save immediately when closing a tab to prevent data loss
+      // This bypasses the debounce to ensure tab state is persisted before any re-render
+      TabPersistenceService.saveTabs(reorderedTabs, newActiveId);
 
       return reorderedTabs;
     });

@@ -1079,6 +1079,39 @@ pub async fn get_project_sessions(project_id: String) -> Result<Vec<Session>, St
     Ok(sessions)
 }
 
+/// Deletes a session and its associated files
+#[tauri::command]
+pub async fn delete_session(
+    session_id: String,
+    project_id: String,
+) -> Result<(), String> {
+    log::info!("Deleting session: {} from project: {}", session_id, project_id);
+
+    let claude_dir = get_claude_dir().map_err(|e| e.to_string())?;
+    let project_dir = claude_dir.join("projects").join(&project_id);
+    let todos_dir = claude_dir.join("todos");
+
+    // Delete the session JSONL file
+    let session_file = project_dir.join(format!("{}.jsonl", session_id));
+    if session_file.exists() {
+        fs::remove_file(&session_file)
+            .map_err(|e| format!("Failed to delete session file: {}", e))?;
+        log::info!("Deleted session file: {:?}", session_file);
+    } else {
+        log::warn!("Session file not found: {:?}", session_file);
+    }
+
+    // Delete associated todo file if it exists
+    let todo_file = todos_dir.join(format!("{}.json", session_id));
+    if todo_file.exists() {
+        fs::remove_file(&todo_file)
+            .map_err(|e| format!("Failed to delete todo file: {}", e))?;
+        log::info!("Deleted todo file: {:?}", todo_file);
+    }
+
+    Ok(())
+}
+
 /// Reads the Claude settings file
 #[tauri::command]
 pub async fn get_claude_settings() -> Result<ClaudeSettings, String> {
