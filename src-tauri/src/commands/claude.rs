@@ -1081,10 +1081,7 @@ pub async fn get_project_sessions(project_id: String) -> Result<Vec<Session>, St
 
 /// Deletes a session and its associated files
 #[tauri::command]
-pub async fn delete_session(
-    session_id: String,
-    project_id: String,
-) -> Result<(), String> {
+pub async fn delete_session(session_id: String, project_id: String) -> Result<(), String> {
     log::info!("Deleting session: {} from project: {}", session_id, project_id);
 
     let claude_dir = get_claude_dir().map_err(|e| e.to_string())?;
@@ -1107,6 +1104,48 @@ pub async fn delete_session(
         fs::remove_file(&todo_file)
             .map_err(|e| format!("Failed to delete todo file: {}", e))?;
         log::info!("Deleted todo file: {:?}", todo_file);
+    }
+
+    Ok(())
+}
+
+/// Deletes multiple sessions and their associated files
+#[tauri::command]
+pub async fn delete_sessions(session_ids: Vec<String>, project_id: String) -> Result<(), String> {
+    log::info!("Deleting {} sessions from project: {}", session_ids.len(), project_id);
+
+    let claude_dir = get_claude_dir().map_err(|e| e.to_string())?;
+    let project_dir = claude_dir.join("projects").join(&project_id);
+    let todos_dir = claude_dir.join("todos");
+
+    let mut failed_deletions = Vec::new();
+
+    for session_id in session_ids {
+        // Delete the session JSONL file
+        let session_file = project_dir.join(format!("{}.jsonl", session_id));
+        if session_file.exists() {
+            if let Err(e) = fs::remove_file(&session_file) {
+                log::error!("Failed to delete session file {}: {}", session_id, e);
+                failed_deletions.push(format!("Failed to delete session {}: {}", session_id, e));
+                continue;
+            }
+            log::info!("Deleted session file: {:?}", session_file);
+        }
+
+        // Delete associated todo file if it exists
+        let todo_file = todos_dir.join(format!("{}.json", session_id));
+        if todo_file.exists() {
+            if let Err(e) = fs::remove_file(&todo_file) {
+                log::warn!("Failed to delete todo file for session {}: {}", session_id, e);
+                // We don't fail the whole operation for a missing todo file
+            } else {
+                log::info!("Deleted todo file: {:?}", todo_file);
+            }
+        }
+    }
+
+    if !failed_deletions.is_empty() {
+        return Err(failed_deletions.join("; "));
     }
 
     Ok(())

@@ -211,6 +211,32 @@ async fn load_session_history(
     }
 }
 
+/// Delete a session and its associated files
+async fn delete_session(
+    Path((session_id, project_id)): Path<(String, String)>,
+) -> Json<ApiResponse<()>> {
+    match commands::claude::delete_session(session_id, project_id).await {
+        Ok(_) => Json(ApiResponse::success(())),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DeleteSessionsRequest {
+    pub session_ids: Vec<String>,
+}
+
+/// Delete multiple sessions
+async fn delete_sessions(
+    Path(project_id): Path<String>,
+    Json(payload): Json<DeleteSessionsRequest>,
+) -> Json<ApiResponse<()>> {
+    match commands::claude::delete_sessions(payload.session_ids, project_id).await {
+        Ok(_) => Json(ApiResponse::success(())),
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
 /// List running Claude sessions
 async fn list_running_claude_sessions() -> Json<ApiResponse<Vec<serde_json::Value>>> {
     // Return empty for web mode - no actual Claude processes in web mode
@@ -806,6 +832,14 @@ pub async fn create_web_server(port: u16) -> Result<(), Box<dyn std::error::Erro
         .route(
             "/api/sessions/{session_id}/history/{project_id}",
             get(load_session_history),
+        )
+        .route(
+            "/api/sessions/{session_id}/delete/{project_id}",
+            get(delete_session),
+        )
+        .route(
+            "/api/sessions/delete-batch/{project_id}",
+            axum::routing::post(delete_sessions),
         )
         .route("/api/sessions/running", get(list_running_claude_sessions))
         // Claude execution endpoints (read-only in web mode)

@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Bot, FolderCode } from "lucide-react";
-import { api, type Project, type Session, type ClaudeMdFile } from "@/lib/api";
+import { api, type Project, type ClaudeMdFile } from "@/lib/api";
 import { initializeWebMode } from "@/lib/apiAdapter";
 import { OutputCacheProvider } from "@/lib/outputCache";
 import { TabProvider } from "@/contexts/TabContext";
@@ -26,12 +26,13 @@ import { TabContent } from "@/components/TabContent";
 import { useTabState } from "@/hooks/useTabState";
 import { useAppLifecycle, useTrackEvent } from "@/hooks";
 import { StartupIntro } from "@/components/StartupIntro";
+import { useSessionStore } from "@/stores/sessionStore";
 
-type View = 
-  | "welcome" 
-  | "projects" 
-  | "editor" 
-  | "claude-file-editor" 
+type View =
+  | "welcome"
+  | "projects"
+  | "editor"
+  | "claude-file-editor"
   | "settings"
   | "cc-agents"
   | "create-agent"
@@ -51,7 +52,9 @@ function AppContent() {
   const { createClaudeMdTab, createSettingsTab, createUsageTab, createMCPTab, createAgentsTab } = useTabState();
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const [sessions, setSessions] = useState<Session[]>([]);
+  const sessionsMap = useSessionStore(state => state.sessions);
+  const fetchProjectSessions = useSessionStore(state => state.fetchProjectSessions);
+  const sessions = selectedProject ? (sessionsMap[selectedProject.id] || []) : [];
   const [editingClaudeFile, setEditingClaudeFile] = useState<ClaudeMdFile | null>(null);
   const [loading, setLoading] = useState(true);
   const [_error, setError] = useState<string | null>(null);
@@ -62,15 +65,15 @@ function AppContent() {
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
   const [projectForSettings, setProjectForSettings] = useState<Project | null>(null);
   const [previousView] = useState<View>("welcome");
-  
+
   // Initialize analytics lifecycle tracking
   useAppLifecycle();
   const trackEvent = useTrackEvent();
-  
+
   // Track user journey milestones
   const [hasTrackedFirstChat] = useState(false);
   // const [hasTrackedFirstAgent] = useState(false);
-  
+
   // Track when user reaches different journey stages
   useEffect(() => {
     if (view === "projects" && projects.length > 0 && !hasTrackedFirstChat) {
@@ -101,11 +104,11 @@ function AppContent() {
   // Keyboard shortcuts for tab navigation
   useEffect(() => {
     if (view !== "tabs") return;
-    
+
     const handleKeyDown = (e: KeyboardEvent) => {
       const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
       const modKey = isMac ? e.metaKey : e.ctrlKey;
-      
+
       if (modKey) {
         switch (e.key) {
           case 't':
@@ -176,8 +179,7 @@ function AppContent() {
     try {
       setLoading(true);
       setError(null);
-      const sessionList = await api.getProjectSessions(project.id);
-      setSessions(sessionList);
+      await fetchProjectSessions(project.id);
       setSelectedProject(project);
     } catch (err) {
       console.error("Failed to load sessions:", err);
@@ -259,7 +261,7 @@ function AppContent() {
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.15, delay: 0.05 }}
                 >
-                  <Card 
+                  <Card
                     className="h-64 cursor-pointer transition-all duration-200 hover:scale-105 hover:shadow-lg border border-border/50 shimmer-hover trailing-border"
                     onClick={() => handleViewChange("cc-agents")}
                   >
@@ -276,7 +278,7 @@ function AppContent() {
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.15, delay: 0.1 }}
                 >
-                  <Card 
+                  <Card
                     className="h-64 cursor-pointer transition-all duration-200 hover:scale-105 hover:shadow-lg border border-border/50 shimmer-hover trailing-border"
                     onClick={() => handleViewChange("projects")}
                   >
@@ -294,8 +296,8 @@ function AppContent() {
 
       case "cc-agents":
         return (
-          <CCAgents 
-            onBack={() => handleViewChange("welcome")} 
+          <CCAgents
+            onBack={() => handleViewChange("welcome")}
           />
         );
 
@@ -305,10 +307,10 @@ function AppContent() {
             <MarkdownEditor onBack={() => handleViewChange("welcome")} />
           </div>
         );
-      
+
       case "settings":
         return <Settings onBack={() => handleViewChange("welcome")} />;
-      
+
       case "projects":
         if (selectedProject) {
           return (
@@ -327,7 +329,7 @@ function AppContent() {
             loading={loading}
           />
         );
-      
+
       case "claude-file-editor":
         return editingClaudeFile ? (
           <ClaudeFileEditor
@@ -335,7 +337,7 @@ function AppContent() {
             onBack={handleBackFromClaudeFileEditor}
           />
         ) : null;
-      
+
       case "tabs":
         return (
           <div className="h-full flex flex-col">
@@ -345,17 +347,17 @@ function AppContent() {
             </div>
           </div>
         );
-      
+
       case "usage-dashboard":
         return (
           <UsageDashboard onBack={() => handleViewChange("welcome")} />
         );
-      
+
       case "mcp":
         return (
           <MCPManager onBack={() => handleViewChange("welcome")} />
         );
-      
+
       case "project-settings":
         if (projectForSettings) {
           return (
@@ -369,7 +371,7 @@ function AppContent() {
           );
         }
         break;
-      
+
       default:
         return null;
     }
@@ -386,7 +388,7 @@ function AppContent() {
         onSettingsClick={() => createSettingsTab()}
         onInfoClick={() => setShowNFO(true)}
       />
-      
+
       {/* Topbar - Commented out since navigation moved to titlebar */}
       {/* <Topbar
         onClaudeClick={() => createClaudeMdTab()}
@@ -396,18 +398,18 @@ function AppContent() {
         onInfoClick={() => setShowNFO(true)}
         onAgentsClick={() => setShowAgentsModal(true)}
       /> */}
-      
-      
-      
+
+
+
       {/* Main Content */}
       <div className="flex-1 overflow-hidden">
         {renderContent()}
       </div>
-      
+
       {/* NFO Credits Modal */}
       {showNFO && <NFOCredits onClose={() => setShowNFO(false)} />}
-      
-      
+
+
       {/* Claude Binary Dialog */}
       <ClaudeBinaryDialog
         open={showClaudeBinaryDialog}
@@ -445,7 +447,7 @@ function AppContent() {
           </div>
         </div>
       )}
-      
+
       {/* Toast Container */}
       <ToastContainer>
         {toast && (
@@ -499,7 +501,7 @@ function App() {
         : null;
       if (cached === 'true') return true;
       if (cached === 'false') return false;
-    } catch (_ignore) {}
+    } catch (_ignore) { }
     return true; // default if no cache
   });
 
