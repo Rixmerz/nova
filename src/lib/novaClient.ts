@@ -78,6 +78,36 @@ export interface SessionInfo {
   projectPath?: string;
 }
 
+// Project information
+export interface ProjectInfo {
+  id: string;
+  name: string;
+  path: string;
+  lastModified: string;
+  sessionCount: number;
+}
+
+// Project session information
+export interface ProjectSessionInfo {
+  id: string;
+  projectId: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
+// Session message from history
+export interface SessionMessage {
+  type: string;
+  message?: {
+    role: string;
+    content: string;
+  };
+  timestamp?: string;
+  [key: string]: unknown;
+}
+
 // Options for invoking an agent
 export interface InvokeOptions {
   plugin: string;
@@ -372,6 +402,83 @@ class NovaClient {
    */
   async getSession(sessionId: string): Promise<SessionInfo> {
     return this.sendRequest<SessionInfo>('session.get', { sessionId });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Project Operations
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * List all projects
+   */
+  async listProjects(): Promise<ProjectInfo[]> {
+    const result = await this.sendRequest<{ projects: ProjectInfo[] }>('project.list');
+    return result.projects;
+  }
+
+  /**
+   * Get sessions for a project
+   * @param projectId Project identifier
+   */
+  async getProjectSessions(projectId: string): Promise<ProjectSessionInfo[]> {
+    const result = await this.sendRequest<{ sessions: ProjectSessionInfo[] }>(
+      'project.sessions',
+      { projectId }
+    );
+    return result.sessions;
+  }
+
+  /**
+   * Load session history
+   * @param sessionId Session identifier
+   * @param projectId Project identifier
+   */
+  async loadSessionHistory(
+    sessionId: string,
+    projectId: string
+  ): Promise<SessionMessage[]> {
+    const result = await this.sendRequest<{ messages: SessionMessage[] }>(
+      'session.history',
+      { sessionId, projectId }
+    );
+    return result.messages;
+  }
+
+  /**
+   * Delete a session
+   * @param sessionId Session identifier
+   * @param projectId Project identifier
+   */
+  async deleteSession(sessionId: string, projectId: string): Promise<void> {
+    await this.sendRequest<{ success: boolean }>('session.delete', {
+      sessionId,
+      projectId,
+    });
+  }
+
+  /**
+   * Delete multiple sessions
+   * @param sessionIds Session identifiers
+   * @param projectId Project identifier
+   */
+  async deleteSessions(
+    sessionIds: string[],
+    projectId: string
+  ): Promise<{ deleted: string[]; failed: string[] }> {
+    return this.sendRequest<{ deleted: string[]; failed: string[] }>(
+      'session.deleteBulk',
+      { sessionIds, projectId }
+    );
+  }
+
+  /**
+   * Get home directory
+   */
+  async getHomeDirectory(): Promise<string> {
+    const result = await this.sendRequest<{ homeDirectory: string }>(
+      'system.homeDirectory'
+    );
+    return result.homeDirectory;
   }
 
   // ─────────────────────────────────────────────────────────────

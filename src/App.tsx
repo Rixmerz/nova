@@ -65,6 +65,7 @@ function AppContent() {
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
   const [projectForSettings, setProjectForSettings] = useState<Project | null>(null);
   const [previousView] = useState<View>("welcome");
+  const [isAppReady, setIsAppReady] = useState(false);
 
   // Initialize analytics lifecycle tracking
   useAppLifecycle();
@@ -87,24 +88,25 @@ function AppContent() {
   }, [view, projects.length, hasTrackedFirstChat, trackEvent]);
 
   // Initialize app with automatic backend detection (Nova > Tauri > Web)
-  const [backendMode, setBackendMode] = useState<'nova' | 'tauri' | 'web' | null>(null);
-
+  // MUST complete before any API calls are made
   useEffect(() => {
     initializeApp().then(mode => {
-      setBackendMode(mode);
       console.log(`[App] Backend mode: ${mode}`);
+      setIsAppReady(true);
     });
   }, []);
 
   // Load projects on mount when in projects view
+  // Wait for app initialization before making API calls
   useEffect(() => {
+    if (!isAppReady) return;
     if (view === "projects") {
       loadProjects();
     } else if (view === "welcome") {
       // Reset loading state for welcome view
       setLoading(false);
     }
-  }, [view]);
+  }, [view, isAppReady]);
 
   // Keyboard shortcuts for tab navigation
   useEffect(() => {

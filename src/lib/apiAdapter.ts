@@ -439,6 +439,117 @@ function transformLegacyClaudeCommand(command: string, params?: any): { command:
 }
 
 /**
+ * Commands that Nova can handle directly
+ */
+const novaHandledCommands = [
+  // Streaming
+  'execute_claude_code', 'continue_claude_code', 'resume_claude_code',
+  // Projects & Sessions
+  'list_projects', 'get_project_sessions', 'load_session_history',
+  'delete_session', 'delete_sessions', 'create_project',
+  // Running sessions (PTY)
+  'list_running_sessions', 'list_running_claude_sessions',
+  // Utils
+  'get_home_directory',
+];
+
+/**
+ * Handle Nova commands (non-streaming)
+ */
+async function handleNovaCommand<T>(command: string, params?: any): Promise<T> {
+  await ensureNovaConnection();
+
+  switch (command) {
+    case 'list_projects': {
+      const projects = await novaClient.listProjects();
+      // Transform to match expected format from Rust backend
+      return projects.map(p => ({
+        id: p.id,
+        name: p.name,
+        path: p.path,
+        last_modified: p.lastModified,
+        session_count: p.sessionCount,
+      })) as T;
+    }
+
+    case 'get_project_sessions': {
+      const projectId = params?.projectId || params?.project_id;
+      const sessions = await novaClient.getProjectSessions(projectId);
+      // Transform to match expected format
+      return sessions.map(s => ({
+        id: s.id,
+        project_id: s.projectId,
+        name: s.name,
+        created_at: s.createdAt,
+        updated_at: s.updatedAt,
+        message_count: s.messageCount,
+      })) as T;
+    }
+
+    case 'load_session_history': {
+      const sessionId = params?.sessionId || params?.session_id;
+      const projectId = params?.projectId || params?.project_id;
+      const messages = await novaClient.loadSessionHistory(sessionId, projectId);
+      return messages as T;
+    }
+
+    case 'delete_session': {
+      const sessionId = params?.sessionId || params?.session_id;
+      const projectId = params?.projectId || params?.project_id;
+      await novaClient.deleteSession(sessionId, projectId);
+      return { success: true } as T;
+    }
+
+    case 'delete_sessions': {
+      const sessionIds = params?.sessionIds || params?.session_ids;
+      const projectId = params?.projectId || params?.project_id;
+      const result = await novaClient.deleteSessions(sessionIds, projectId);
+      return result as T;
+    }
+
+    case 'get_home_directory': {
+      const homeDir = await novaClient.getHomeDirectory();
+      return homeDir as T;
+    }
+
+    case 'list_running_sessions':
+    case 'list_running_claude_sessions': {
+      // Get running PTY sessions from Nova
+      const sessions = await novaClient.listSessions();
+      // Transform to match expected format from Rust backend
+      return sessions.map(s => ({
+        id: s.id,
+        agent_id: s.agentId,
+        plugin_id: s.pluginId,
+        status: s.status,
+        created_at: s.createdAt,
+        project_path: s.projectPath,
+      })) as T;
+    }
+
+    case 'create_project': {
+      // Convert path to project ID (Claude's encoding: /Users/foo/bar → -Users-foo-bar)
+      const path = params?.path || '';
+      const projectId = path.replace(/\//g, '-');
+      const name = path.split('/').filter(Boolean).pop() || path;
+
+      // Return synthetic project info - Claude CLI will create the actual project
+      // when a session is started in this directory
+      return {
+        id: projectId,
+        name: name,
+        path: path,
+        last_modified: new Date().toISOString(),
+        session_count: 0,
+      } as T;
+    }
+
+    default:
+      throw new Error(`Unknown Nova command: ${command}`);
+  }
+}
+
+/**
  * Unified API adapter that works in Tauri, MCP, and web environments
  */
 export async function apiCall<T>(command: string, params?: any): Promise<T> {
@@ -446,6 +557,18 @@ export async function apiCall<T>(command: string, params?: any): Promise<T> {
 
   // Transform legacy Claude commands for Tauri environment
   const legacyStreamingCommands = ['execute_claude_code', 'continue_claude_code', 'resume_claude_code'];
+
+  // Nova mode - route supported commands to Nova server
+  if (env === 'nova' && novaHandledCommands.includes(command)) {
+    // Streaming commands
+    if (legacyStreamingCommands.includes(command)) {
+      console.log(`[Nova] Routing streaming command: ${command}`);
+      return handleNovaStreamingCommand<T>(command, params);
+    }
+    // Non-streaming commands
+    console.log(`[Nova] Routing command: ${command}`);
+    return handleNovaCommand<T>(command, params);
+  }
 
   // Nova mode - route streaming commands to Nova server (new plugin architecture)
   if (env === 'nova' && legacyStreamingCommands.includes(command)) {

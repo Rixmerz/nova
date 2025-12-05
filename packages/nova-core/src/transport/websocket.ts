@@ -11,6 +11,8 @@ import { getPluginRegistry, PluginRegistry } from '../core/plugin-registry.js';
 import { getPluginLoader, PluginLoader } from '../core/plugin-loader.js';
 import { getConfigLoader, ConfigLoader } from '../core/config.js';
 import type { SessionEvent, StreamCallback } from '../interfaces/index.js';
+import * as projectService from '../services/projects.js';
+import * as sessionService from '../services/sessions.js';
 
 const DEFAULT_PORT = 8080;
 const WS_PATH = '/nova';
@@ -92,8 +94,26 @@ export class WebSocketNovaServer {
 
     // Create HTTP server
     this.httpServer = createServer((req, res) => {
+      // Handle CORS preflight
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+        });
+        res.end();
+        return;
+      }
+
+      // Add CORS headers to all responses
+      const headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      };
+
       if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, { ...headers, 'Content-Type': 'application/json' });
         res.end(
           JSON.stringify({
             status: 'ok',
@@ -106,7 +126,7 @@ export class WebSocketNovaServer {
       }
 
       if (req.url === '/plugins') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, { ...headers, 'Content-Type': 'application/json' });
         res.end(
           JSON.stringify({
             plugins: this.registry.getPlugins().map((p) => ({
@@ -120,7 +140,7 @@ export class WebSocketNovaServer {
         return;
       }
 
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.writeHead(200, { ...headers, 'Content-Type': 'text/plain' });
       res.end(`Nova Core Server - Connect via WebSocket at ${WS_PATH}`);
     });
 
@@ -232,6 +252,42 @@ export class WebSocketNovaServer {
 
         case 'session.unsubscribe':
           result = this.handleSessionUnsubscribe(ws, params as { sessionId: string });
+          break;
+
+        // Project operations
+        case 'project.list':
+          result = await this.handleProjectList();
+          break;
+
+        case 'project.sessions':
+          result = await this.handleProjectSessions(params as { projectId: string });
+          break;
+
+        // Session history operations
+        case 'session.history':
+          result = await this.handleSessionHistory(params as {
+            sessionId: string;
+            projectId: string;
+          });
+          break;
+
+        case 'session.delete':
+          result = await this.handleSessionDelete(params as {
+            sessionId: string;
+            projectId: string;
+          });
+          break;
+
+        case 'session.deleteBulk':
+          result = await this.handleSessionDeleteBulk(params as {
+            sessionIds: string[];
+            projectId: string;
+          });
+          break;
+
+        // Utility operations
+        case 'system.homeDirectory':
+          result = { homeDirectory: projectService.getHomeDirectory() };
           break;
 
         default:
@@ -388,6 +444,62 @@ export class WebSocketNovaServer {
       }
     }
     return { unsubscribed: true, sessionId: params.sessionId };
+  }
+
+  // ===== PROJECT HANDLERS =====
+
+  /**
+   * List all projects
+   */
+  private async handleProjectList(): Promise<unknown> {
+    const projects = await projectService.listProjects();
+    return { projects };
+  }
+
+  /**
+   * Get sessions for a project
+   */
+  private async handleProjectSessions(params: { projectId: string }): Promise<unknown> {
+    const sessions = await projectService.getProjectSessions(params.projectId);
+    return { sessions };
+  }
+
+  // ===== SESSION HISTORY HANDLERS =====
+
+  /**
+   * Load session history
+   */
+  private async handleSessionHistory(params: {
+    sessionId: string;
+    projectId: string;
+  }): Promise<unknown> {
+    const messages = await sessionService.loadSessionHistory(
+      params.sessionId,
+      params.projectId
+    );
+    return { messages };
+  }
+
+  /**
+   * Delete a session
+   */
+  private async handleSessionDelete(params: {
+    sessionId: string;
+    projectId: string;
+  }): Promise<unknown> {
+    await sessionService.deleteSession(params.sessionId, params.projectId);
+    return { success: true };
+  }
+
+  /**
+   * Delete multiple sessions
+   */
+  private async handleSessionDeleteBulk(params: {
+    sessionIds: string[];
+    projectId: string;
+  }): Promise<unknown> {
+    const result = await sessionService.deleteSessions(params.sessionIds, params.projectId);
+    return result;
   }
 
   /**
