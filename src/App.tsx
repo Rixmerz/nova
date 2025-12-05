@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Bot, FolderCode } from "lucide-react";
 import { api, type Project, type ClaudeMdFile } from "@/lib/api";
-import { initializeWebMode } from "@/lib/apiAdapter";
+import { initializeApp } from "@/lib/apiAdapter";
 import { OutputCacheProvider } from "@/lib/outputCache";
 import { TabProvider } from "@/contexts/TabContext";
 import { ThemeProvider } from "@/contexts/ThemeContext";
@@ -86,9 +86,14 @@ function AppContent() {
     }
   }, [view, projects.length, hasTrackedFirstChat, trackEvent]);
 
-  // Initialize web mode compatibility on mount
+  // Initialize app with automatic backend detection (Nova > Tauri > Web)
+  const [backendMode, setBackendMode] = useState<'nova' | 'tauri' | 'web' | null>(null);
+
   useEffect(() => {
-    initializeWebMode();
+    initializeApp().then(mode => {
+      setBackendMode(mode);
+      console.log(`[App] Backend mode: ${mode}`);
+    });
   }, []);
 
   // Load projects on mount when in projects view

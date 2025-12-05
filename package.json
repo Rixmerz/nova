@@ -16,7 +16,18 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "build:dmg": "tauri build --bundles dmg",
-    "check": "tsc --noEmit && cd src-tauri && cargo check"
+    "check": "tsc --noEmit && cd src-tauri && cargo check",
+    "mcp:install": "cd packages/mcp && npm install",
+    "mcp:dev": "cd packages/mcp && npm run dev",
+    "mcp:build": "cd packages/mcp && npm run build",
+    "mcp:start": "cd packages/mcp && npm start",
+    "nova:install": "cd packages/nova-core && npm install && cd ../../plugins/claude_cli && npm install",
+    "nova:build": "cd packages/nova-core && npm run build && cd ../../plugins/claude_cli && npm run build",
+    "nova:dev": "cd packages/nova-core && npm run dev",
+    "nova:start": "cd packages/nova-core && npm run start:ws",
+    "dev:nova": "npm run nova:start & sleep 2 && npm run dev",
+    "dev:with-nova": "npm run nova:start & sleep 2 && vite --port 1420",
+    "tauri:nova": "npm run nova:start & sleep 2 && tauri dev"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",

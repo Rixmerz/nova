@@ -1,0 +1,28 @@
+{
+  "name": "claude_cli",
+  "version": "1.0.0",
+  "type": "llm",
+  "source": "cli",
+  "supports": ["chat", "tools", "plan", "code"],
+  "entry": "./index.js",
+  "agents": [
+    {
+      "id": "haiku",
+      "name": "Claude Haiku",
+      "capabilities": ["chat"],
+      "description": "Fast and efficient for simple tasks"
+    },
+    {
+      "id": "sonnet",
+      "name": "Claude Sonnet",
+      "capabilities": ["chat", "tools", "code"],
+      "description": "Balanced performance for most tasks"
+    },
+    {
+      "id": "opus",
+      "name": "Claude Opus",
+      "capabilities": ["chat", "tools", "plan", "code"],
+      "description": "Most capable for complex tasks"
+    }
+  ]
+}

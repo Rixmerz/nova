@@ -1,25 +1,72 @@
 /**
- * API Adapter - Compatibility layer for Tauri vs Web environments
- * 
- * This module detects whether we're running in Tauri (desktop app) or web browser
- * and provides a unified interface that switches between:
- * - Tauri invoke calls (for desktop)
- * - REST API calls (for web/phone browser)
+ * API Adapter - Compatibility layer for Tauri vs Web vs MCP environments
+ *
+ * This module detects the runtime environment and provides a unified interface:
+ * - Tauri invoke calls (for desktop app)
+ * - MCP WebSocket calls (for MCP-enabled mode)
+ * - REST API calls (for web/phone browser fallback)
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { mcpClient, type AgentEvent } from "./mcpClient";
+import { novaClient, type SessionEvent } from "./novaClient";
 
-// Extend Window interface for Tauri
+// Extend Window interface for Tauri and MCP
 declare global {
   interface Window {
     __TAURI__?: any;
     __TAURI_METADATA__?: any;
     __TAURI_INTERNALS__?: any;
+    /** Enable MCP mode for agent execution */
+    __MCP_ENABLED__?: boolean;
+    /** MCP Server URL (default: ws://localhost:8080/mcp) */
+    __MCP_SERVER_URL__?: string;
+    /** Enable Nova mode for agent execution (new plugin architecture) */
+    __NOVA_ENABLED__?: boolean;
+    /** Nova Server URL (default: ws://localhost:8080/nova) */
+    __NOVA_SERVER_URL__?: string;
   }
 }
 
 // Environment detection
 let isTauriEnvironment: boolean | null = null;
+let isMCPConnected = false;
+let isNovaConnected = false;
+
+/**
+ * Environment types
+ */
+type Environment = 'tauri' | 'mcp' | 'nova' | 'web';
+
+/**
+ * Check if MCP mode is enabled
+ */
+function isMCPEnabled(): boolean {
+  if (typeof window === 'undefined') return false;
+  return !!window.__MCP_ENABLED__;
+}
+
+/**
+ * Get MCP server URL
+ */
+function getMCPServerURL(): string {
+  return window.__MCP_SERVER_URL__ || 'ws://localhost:8080/mcp';
+}
+
+/**
+ * Check if Nova mode is enabled
+ */
+function isNovaEnabled(): boolean {
+  if (typeof window === 'undefined') return false;
+  return !!window.__NOVA_ENABLED__;
+}
+
+/**
+ * Get Nova server URL
+ */
+function getNovaServerURL(): string {
+  return window.__NOVA_SERVER_URL__ || 'ws://localhost:8080/nova';
+}
 
 /**
  * Detect if we're running in Tauri environment
@@ -48,6 +95,162 @@ function detectEnvironment(): boolean {
 
   isTauriEnvironment = isTauri;
   return isTauri;
+}
+
+/**
+ * Get the current environment for routing
+ */
+function getEnvironment(): Environment {
+  // Nova takes precedence (new plugin architecture)
+  if (isNovaEnabled()) return 'nova';
+  if (isMCPEnabled()) return 'mcp';
+  if (detectEnvironment()) return 'tauri';
+  return 'web';
+}
+
+/**
+ * Connect to MCP server if not already connected
+ */
+async function ensureMCPConnection(): Promise<void> {
+  if (isMCPConnected && mcpClient.connected) return;
+
+  const url = getMCPServerURL();
+  console.log(`[MCP] Connecting to ${url}...`);
+  await mcpClient.connect(url);
+  isMCPConnected = true;
+  console.log('[MCP] Connected');
+}
+
+/**
+ * Connect to Nova server if not already connected
+ */
+async function ensureNovaConnection(): Promise<void> {
+  if (isNovaConnected && novaClient.connected) return;
+
+  const url = getNovaServerURL();
+  console.log(`[Nova] Connecting to ${url}...`);
+  await novaClient.connect(url);
+  isNovaConnected = true;
+  console.log('[Nova] Connected');
+}
+
+/**
+ * Handle Claude execution commands via MCP
+ */
+async function handleMCPStreamingCommand<T>(command: string, params?: any): Promise<T> {
+  await ensureMCPConnection();
+
+  const projectPath = params?.projectPath || params?.project_path || '';
+  const prompt = params?.prompt || '';
+  const model = params?.model || 'haiku';
+  const sessionId = params?.sessionId || params?.session_id;
+
+  console.log(`[MCP] Handling command: ${command}`, { projectPath, prompt, model, sessionId });
+
+  // Determine session mode
+  let resume: string | undefined;
+  if (command === 'resume_claude_code' && sessionId && isValidUUID(sessionId)) {
+    resume = sessionId;
+  }
+
+  // Start the agent
+  const result = await mcpClient.startAgent({
+    projectPath,
+    prompt,
+    model: model as 'haiku' | 'sonnet' | 'opus',
+    resume,
+  });
+
+  if (result.status === 'error') {
+    throw new Error(result.error || 'Failed to start agent');
+  }
+
+  console.log(`[MCP] Agent started with sessionId: ${result.sessionId}`);
+
+  // Subscribe to agent events and forward them as DOM events for UI compatibility
+  const unsubscribe = mcpClient.onAgentEvent(result.sessionId, (event: AgentEvent) => {
+    console.log(`[MCP] Agent event:`, event);
+
+    if (event.type === 'output') {
+      // Forward as claude-output event for existing UI compatibility
+      const customEvent = new CustomEvent('claude-output', {
+        detail: event.data.message || { raw: event.data.raw },
+      });
+      window.dispatchEvent(customEvent);
+    } else if (event.type === 'error') {
+      console.error(`[MCP] Agent error:`, event.data.error);
+    } else if (event.type === 'complete') {
+      // Forward as claude-complete event
+      const completeEvent = new CustomEvent('claude-complete', {
+        detail: event.data.exitCode === 0,
+      });
+      window.dispatchEvent(completeEvent);
+      unsubscribe();
+    }
+  });
+
+  // Return session info for the UI
+  return { sessionId: result.sessionId } as T;
+}
+
+/**
+ * Handle Claude execution commands via Nova (new plugin architecture)
+ */
+async function handleNovaStreamingCommand<T>(command: string, params?: any): Promise<T> {
+  await ensureNovaConnection();
+
+  const projectPath = params?.projectPath || params?.project_path || '';
+  const prompt = params?.prompt || '';
+  const model = params?.model || 'sonnet'; // Nova defaults to sonnet
+  const sessionId = params?.sessionId || params?.session_id;
+
+  console.log(`[Nova] Handling command: ${command}`, { projectPath, prompt, model, sessionId });
+
+  // Determine if we're resuming
+  let resume: string | undefined;
+  if (command === 'resume_claude_code' && sessionId && isValidUUID(sessionId)) {
+    resume = sessionId;
+  }
+
+  // Invoke the agent via Nova
+  const result = await novaClient.invoke({
+    plugin: 'claude_cli',
+    agent: model as string,
+    projectPath,
+    prompt,
+    resume,
+  });
+
+  console.log(`[Nova] Agent invoked with sessionId: ${result.sessionId}`);
+
+  // Subscribe to session events and forward them as DOM events for UI compatibility
+  const unsubscribe = novaClient.onSessionEvent(result.sessionId, (event: SessionEvent) => {
+    console.log(`[Nova] Session event:`, event);
+
+    if (event.type === 'output') {
+      // Forward as claude-output event for existing UI compatibility
+      const customEvent = new CustomEvent('claude-output', {
+        detail: event.data.message || { raw: event.data.raw },
+      });
+      window.dispatchEvent(customEvent);
+    } else if (event.type === 'error') {
+      console.error(`[Nova] Session error:`, event.data.error);
+      const errorEvent = new CustomEvent('claude-error', {
+        detail: event.data.error,
+      });
+      window.dispatchEvent(errorEvent);
+    } else if (event.type === 'complete') {
+      // Forward as claude-complete event
+      const completeEvent = new CustomEvent('claude-complete', {
+        detail: event.data.exitCode === 0,
+      });
+      window.dispatchEvent(completeEvent);
+      unsubscribe();
+    }
+  });
+
+  // Return session info for the UI
+  return { sessionId: result.sessionId } as T;
 }
 
 /**
@@ -236,15 +439,27 @@ function transformLegacyClaudeCommand(command: string, params?: any): { command:
 }
 
 /**
- * Unified API adapter that works in both Tauri and web environments
+ * Unified API adapter that works in Tauri, MCP, and web environments
  */
 export async function apiCall<T>(command: string, params?: any): Promise<T> {
-  const isWeb = !detectEnvironment();
+  const env = getEnvironment();
 
   // Transform legacy Claude commands for Tauri environment
   const legacyStreamingCommands = ['execute_claude_code', 'continue_claude_code', 'resume_claude_code'];
 
-  if (!isWeb) {
+  // Nova mode - route streaming commands to Nova server (new plugin architecture)
+  if (env === 'nova' && legacyStreamingCommands.includes(command)) {
+    console.log(`[Nova] Routing streaming command: ${command}`);
+    return handleNovaStreamingCommand<T>(command, params);
+  }
+
+  // MCP mode - route streaming commands to MCP server (legacy)
+  if (env === 'mcp' && legacyStreamingCommands.includes(command)) {
+    console.log(`[MCP] Routing streaming command: ${command}`);
+    return handleMCPStreamingCommand<T>(command, params);
+  }
+
+  if (env === 'tauri') {
     // Tauri environment - try invoke
     let actualCommand = command;
     let actualParams = params;
@@ -405,9 +620,86 @@ function mapCommandToEndpoint(command: string, _params?: any): string {
  */
 export function getEnvironmentInfo() {
   return {
+    environment: getEnvironment(),
     isTauri: detectEnvironment(),
+    isMCPEnabled: isMCPEnabled(),
+    isMCPConnected: mcpClient.connected,
+    mcpServerURL: getMCPServerURL(),
+    isNovaEnabled: isNovaEnabled(),
+    isNovaConnected: novaClient.connected,
+    novaServerURL: getNovaServerURL(),
     userAgent: navigator.userAgent,
     location: window.location.href,
+  };
+}
+
+/**
+ * Enable MCP mode for agent execution
+ * @param serverUrl - Optional MCP server URL (default: ws://localhost:8080/mcp)
+ */
+export function enableMCP(serverUrl?: string): void {
+  window.__MCP_ENABLED__ = true;
+  if (serverUrl) {
+    window.__MCP_SERVER_URL__ = serverUrl;
+  }
+  console.log('[MCP] Mode enabled. Server:', getMCPServerURL());
+}
+
+/**
+ * Disable MCP mode
+ */
+export function disableMCP(): void {
+  window.__MCP_ENABLED__ = false;
+  mcpClient.disconnect();
+  isMCPConnected = false;
+  console.log('[MCP] Mode disabled');
+}
+
+/**
+ * Check if MCP is currently enabled and connected
+ */
+export function getMCPStatus(): { enabled: boolean; connected: boolean; url: string } {
+  return {
+    enabled: isMCPEnabled(),
+    connected: mcpClient.connected,
+    url: getMCPServerURL(),
+  };
+}
+
+/**
+ * Enable Nova mode for agent execution (new plugin architecture)
+ * @param serverUrl - Optional Nova server URL (default: ws://localhost:8080/nova)
+ */
+export function enableNova(serverUrl?: string): void {
+  // Disable MCP if it was enabled (Nova takes precedence)
+  if (isMCPEnabled()) {
+    disableMCP();
+  }
+  window.__NOVA_ENABLED__ = true;
+  if (serverUrl) {
+    window.__NOVA_SERVER_URL__ = serverUrl;
+  }
+  console.log('[Nova] Mode enabled. Server:', getNovaServerURL());
+}
+
+/**
+ * Disable Nova mode
+ */
+export function disableNova(): void {
+  window.__NOVA_ENABLED__ = false;
+  novaClient.disconnect();
+  isNovaConnected = false;
+  console.log('[Nova] Mode disabled');
+}
+
+/**
+ * Check if Nova is currently enabled and connected
+ */
+export function getNovaStatus(): { enabled: boolean; connected: boolean; url: string } {
+  return {
+    enabled: isNovaEnabled(),
+    connected: novaClient.connected,
+    url: getNovaServerURL(),
   };
 }
 
@@ -573,4 +865,65 @@ export function initializeWebMode() {
       };
     }
   }
+}
+
+/**
+ * Auto-detect and connect to Nova server if available
+ * This checks if Nova is running and automatically enables Nova mode
+ */
+export async function autoDetectNova(serverUrl?: string): Promise<boolean> {
+  const url = serverUrl || 'http://localhost:8080';
+
+  try {
+    console.log(`[Nova] Checking for Nova server at ${url}...`);
+
+    // Try to fetch the health endpoint
+    const response = await fetch(`${url}/health`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(2000), // 2 second timeout
+    });
+
+    if (response.ok) {
+      const health = await response.json();
+      if (health.status === 'ok') {
+        console.log(`[Nova] Server detected! Plugins: ${health.plugins}, Sessions: ${health.sessions}`);
+
+        // Enable Nova mode
+        enableNova(url.replace('http', 'ws') + '/nova');
+
+        return true;
+      }
+    }
+  } catch (error) {
+    // Server not available - this is expected if Nova isn't running
+    console.log('[Nova] Server not available, using Tauri backend');
+  }
+
+  return false;
+}
+
+/**
+ * Initialize the application with automatic backend detection
+ * Priority: Nova > Tauri > Web
+ */
+export async function initializeApp(): Promise<'nova' | 'tauri' | 'web'> {
+  // First, set up web mode compatibility
+  initializeWebMode();
+
+  // If we're in Tauri, check if Nova is also available (for hybrid mode)
+  // If Nova is available, prefer it over Tauri backend
+  const novaAvailable = await autoDetectNova();
+
+  if (novaAvailable) {
+    console.log('[App] Initialized with Nova backend');
+    return 'nova';
+  }
+
+  if (detectEnvironment()) {
+    console.log('[App] Initialized with Tauri backend');
+    return 'tauri';
+  }
+
+  console.log('[App] Initialized in web mode');
+  return 'web';
 }

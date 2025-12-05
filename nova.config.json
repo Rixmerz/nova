@@ -1,0 +1,19 @@
+{
+  "plugins": {
+    "claude_cli": {
+      "enabled": true,
+      "agents": {
+        "haiku": true,
+        "sonnet": true,
+        "opus": true
+      }
+    }
+  },
+  "defaults": {
+    "agent": "claude_cli:sonnet"
+  },
+  "server": {
+    "port": 8080,
+    "host": "localhost"
+  }
+}

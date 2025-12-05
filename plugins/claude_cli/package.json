@@ -1,0 +1,18 @@
+{
+  "name": "@nova/plugin-claude-cli",
+  "version": "1.0.0",
+  "description": "Claude CLI plugin for Nova",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "typescript": "~5.6.2"
+  }
+}
