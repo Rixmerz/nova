@@ -224,6 +224,7 @@ export class WebSocketNovaServer {
             prompt: string;
             projectPath: string;
             resume?: string;
+            bypassMode?: boolean;
           });
           break;
 
@@ -349,14 +350,16 @@ export class WebSocketNovaServer {
       prompt: string;
       projectPath: string;
       resume?: string;
+      bypassMode?: boolean;
     }
   ): Promise<unknown> {
-    const { plugin, agent, prompt, projectPath, resume } = params;
+    const { plugin, agent, prompt, projectPath, resume, bypassMode } = params;
 
     const session = await this.registry.invoke(plugin, agent, {
       projectPath,
       prompt,
       resume,
+      bypassMode,
     });
 
     // Auto-subscribe this connection to the session
@@ -364,6 +367,7 @@ export class WebSocketNovaServer {
 
     return {
       sessionId: session.id,
+      claudeSessionId: session.claudeSessionId,
       status: session.status,
       agentId: session.agentId,
       pluginId: session.pluginId,
@@ -527,6 +531,7 @@ export class WebSocketNovaServer {
    */
   private broadcastSessionEvent(sessionId: string, event: SessionEvent): void {
     const sockets = this.sessionSubscriptions.get(sessionId);
+    console.log(`[WS] Broadcasting event to ${sockets?.size ?? 0} clients: type=${event.type}`);
     if (!sockets) return;
 
     const notification: JSONRPCNotification = {

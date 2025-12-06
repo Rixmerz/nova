@@ -1,13 +1,19 @@
 /**
  * Claude CLI Plugin for Nova
  *
- * Provides Claude CLI integration via node-pty.
+ * Provides Claude CLI integration via node-pty with streaming JSON I/O.
  * Supports haiku, sonnet, and opus models.
  */
 
+import {
+  StreamingPTYSession,
+  type PermissionMode,
+  type SessionEvent,
+} from './pty-session.js';
+
 // Types imported from nova-core (inline for plugin isolation)
 type AgentCapability = 'chat' | 'tools' | 'plan' | 'code' | 'realtime' | 'vision';
-type SessionStatus = 'starting' | 'running' | 'completed' | 'error' | 'stopped';
+type SessionStatus = 'starting' | 'running' | 'completed' | 'error' | 'stopped' | 'waiting-for-input';
 
 interface IAgent {
   id: string;
@@ -25,29 +31,27 @@ interface ISession {
   createdAt: Date;
   projectPath: string;
   resumeSessionId?: string;
+  claudeSessionId?: string;
 }
 
 interface InvokeOptions {
   projectPath: string;
   prompt: string;
   resume?: string;
+  permissionMode?: PermissionMode;
+  tools?: string[];
+  disallowedTools?: string[];
+  // Legacy
+  bypassMode?: boolean;
+}
+
+interface InvokeResult extends ISession {
+  claudeSessionId: string;
 }
 
 interface MessageResult {
   success: boolean;
   error?: string;
-}
-
-interface SessionEvent {
-  sessionId: string;
-  type: 'output' | 'error' | 'complete' | 'status';
-  data: {
-    message?: Record<string, unknown>;
-    raw?: string;
-    error?: string;
-    exitCode?: number | null;
-  };
-  timestamp: string;
 }
 
 type StreamCallback = (event: SessionEvent) => void;
@@ -76,7 +80,7 @@ interface INovaPlugin {
   shutdown(): Promise<void>;
   readonly agents: IAgent[];
   getAgent(agentId: string): IAgent | undefined;
-  invoke(agentId: string, options: InvokeOptions): Promise<ISession>;
+  invoke(agentId: string, options: InvokeOptions): Promise<InvokeResult>;
   message(sessionId: string, message: string): Promise<MessageResult>;
   stream(sessionId: string, callback: StreamCallback): () => void;
   stop(sessionId: string): Promise<void>;
@@ -87,12 +91,11 @@ interface INovaPlugin {
 interface ConfigLoader {
   isAgentEnabled(pluginName: string, agentId: string): boolean;
 }
-import { PTYSession } from './pty-session.js';
 
 /**
  * Claude CLI Plugin
  *
- * Implements INovaPlugin for Claude CLI integration.
+ * Implements INovaPlugin for Claude CLI integration with streaming JSON I/O.
  */
 class ClaudeCLIPlugin implements INovaPlugin {
   // Metadata
@@ -103,7 +106,7 @@ class ClaudeCLIPlugin implements INovaPlugin {
 
   // Internal state
   private _agents: IAgent[] = [];
-  private sessions = new Map<string, PTYSession>();
+  private sessions = new Map<string, StreamingPTYSession>();
   private configLoader: ConfigLoader;
   private manifest: PluginManifest;
   private initialized = false;
@@ -128,7 +131,7 @@ class ClaudeCLIPlugin implements INovaPlugin {
       return;
     }
 
-    console.log('[ClaudeCLI] Initializing plugin...');
+    console.log('[ClaudeCLI] Initializing plugin (streaming mode)...');
 
     // Build agent list from manifest with config overrides
     this._agents = this.manifest.agents.map((agentDef) => ({
@@ -175,9 +178,9 @@ class ClaudeCLIPlugin implements INovaPlugin {
   }
 
   /**
-   * Invoke an agent and create a new session
+   * Invoke an agent and create a new streaming session
    */
-  async invoke(agentId: string, options: InvokeOptions): Promise<ISession> {
+  async invoke(agentId: string, options: InvokeOptions): Promise<InvokeResult> {
     const agent = this.getAgent(agentId);
     if (!agent) {
       throw new Error(`Agent '${agentId}' not found`);
@@ -189,22 +192,43 @@ class ClaudeCLIPlugin implements INovaPlugin {
 
     console.log(`[ClaudeCLI] Invoking agent ${agentId} with prompt: ${options.prompt.substring(0, 50)}...`);
 
-    const session = new PTYSession({
+    // Convert legacy bypassMode to permissionMode
+    let permissionMode: PermissionMode = options.permissionMode || 'bypassPermissions';
+    if (options.bypassMode === false) {
+      permissionMode = 'default';
+    }
+
+    console.log(`[ClaudeCLI] Permission mode: ${permissionMode}`);
+    console.log(`[ClaudeCLI] Resume session: ${options.resume || 'none'}`);
+
+    const session = new StreamingPTYSession({
       projectPath: options.projectPath,
-      prompt: options.prompt,
       agentId,
-      resume: options.resume,
+      permissionMode,
+      resumeSessionId: options.resume,
+      tools: options.tools,
+      disallowedTools: options.disallowedTools,
     });
 
-    // Start the session
-    await session.start(options.prompt);
-
-    // Store session
+    // Store session before starting
     this.sessions.set(session.id, session);
 
-    console.log(`[ClaudeCLI] Session created: ${session.id}`);
+    // Start the session with the initial prompt
+    await session.start(options.prompt);
 
-    return session;
+    console.log(`[ClaudeCLI] Session created: ${session.id}`);
+    console.log(`[ClaudeCLI] Claude session ID: ${session.claudeSessionId}`);
+
+    return {
+      id: session.id,
+      agentId: session.agentId,
+      pluginId: session.pluginId,
+      status: session.status,
+      createdAt: session.createdAt,
+      projectPath: session.projectPath,
+      resumeSessionId: session.resumeSessionId,
+      claudeSessionId: session.claudeSessionId,
+    };
   }
 
   /**
@@ -216,6 +240,7 @@ class ClaudeCLIPlugin implements INovaPlugin {
       return { success: false, error: `Session '${sessionId}' not found` };
     }
 
+    console.log(`[ClaudeCLI] Sending message to session ${sessionId}: ${message.substring(0, 50)}...`);
     return session.sendMessage(message);
   }
 
@@ -251,14 +276,35 @@ class ClaudeCLIPlugin implements INovaPlugin {
    * Get a session by ID
    */
   getSession(sessionId: string): ISession | undefined {
-    return this.sessions.get(sessionId);
+    const session = this.sessions.get(sessionId);
+    if (!session) return undefined;
+
+    return {
+      id: session.id,
+      agentId: session.agentId,
+      pluginId: session.pluginId,
+      status: session.status,
+      createdAt: session.createdAt,
+      projectPath: session.projectPath,
+      resumeSessionId: session.resumeSessionId,
+      claudeSessionId: session.claudeSessionId,
+    };
   }
 
   /**
    * Get all active sessions
    */
   getSessions(): ISession[] {
-    return Array.from(this.sessions.values());
+    return Array.from(this.sessions.values()).map((session) => ({
+      id: session.id,
+      agentId: session.agentId,
+      pluginId: session.pluginId,
+      status: session.status,
+      createdAt: session.createdAt,
+      projectPath: session.projectPath,
+      resumeSessionId: session.resumeSessionId,
+      claudeSessionId: session.claudeSessionId,
+    }));
   }
 }
 
@@ -275,3 +321,6 @@ export default function createPlugin(
 
 // Also export as named function
 export { createPlugin };
+
+// Re-export types for external use
+export type { PermissionMode, SessionEvent };

@@ -1,8 +1,10 @@
 /**
- * PTY Session for Claude CLI
+ * Streaming PTY Session for Claude CLI
  *
- * Wraps a node-pty process for Claude CLI interaction.
- * Based on patterns from ptyclaude project.
+ * Uses bidirectional JSON streaming for persistent sessions:
+ * - Input: --input-format stream-json (send messages via stdin)
+ * - Output: --output-format stream-json (receive structured responses)
+ * - Permission modes: default, plan, acceptEdits, bypassPermissions, dontAsk
  */
 
 import * as pty from 'node-pty';
@@ -11,25 +13,69 @@ import { execSync } from 'child_process';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+// Note: randomUUID no longer needed - Claude CLI generates its own session ID
 
-// Types (inline for plugin isolation)
-type SessionStatus = 'starting' | 'running' | 'completed' | 'error' | 'stopped';
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
 
-interface SessionEvent {
+/**
+ * Permission modes available in Claude CLI
+ */
+export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk' | 'plan';
+
+/**
+ * Session lifecycle states
+ */
+export type SessionState =
+  | 'initializing'  // PTY spawned, waiting for init message
+  | 'ready'         // Got init message, ready for messages
+  | 'processing'    // Processing a user message
+  | 'idle'          // Ready for next message
+  | 'error'         // Error state
+  | 'stopped';      // Explicitly stopped
+
+/**
+ * Session status for external consumers
+ */
+export type SessionStatus = 'starting' | 'running' | 'completed' | 'error' | 'stopped' | 'waiting-for-input';
+
+/**
+ * Options for creating a streaming PTY session
+ */
+export interface StreamingPTYSessionOptions {
+  projectPath: string;
+  agentId: string;                    // Model: haiku, sonnet, opus
+  permissionMode?: PermissionMode;    // Default: 'bypassPermissions'
+  sessionId?: string;                 // Specify exact UUID, or generate one
+  resumeSessionId?: string;           // Claude session UUID to resume
+  forkSession?: boolean;              // Create new session when resuming
+  tools?: string[];                   // Whitelist tools
+  disallowedTools?: string[];         // Blacklist tools
+}
+
+/**
+ * Session event payload
+ */
+export interface SessionEvent {
   sessionId: string;
-  type: 'output' | 'error' | 'complete' | 'status';
+  type: 'output' | 'error' | 'complete' | 'status' | 'init';
   data: {
     message?: Record<string, unknown>;
     raw?: string;
     error?: string;
     exitCode?: number | null;
+    claudeSessionId?: string;
   };
   timestamp: string;
 }
 
 type StreamCallback = (event: SessionEvent) => void;
 
-interface ISession {
+/**
+ * Session interface for Nova compatibility
+ */
+export interface ISession {
   id: string;
   agentId: string;
   pluginId: string;
@@ -38,6 +84,10 @@ interface ISession {
   projectPath: string;
   resumeSessionId?: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Claude Binary Discovery
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Find the Claude binary on the system
@@ -50,6 +100,7 @@ function findClaudeBinary(): string {
     join(homedir(), '.npm-global/bin/claude'),
     join(homedir(), '.yarn/bin/claude'),
     join(homedir(), '.local/bin/claude'),
+    join(homedir(), '.nvm/versions/node/v22.16.0/bin/claude'),
   ];
 
   for (const p of paths) {
@@ -71,22 +122,18 @@ function findClaudeBinary(): string {
   throw new Error('Claude binary not found. Install with: npm install -g @anthropic-ai/claude-code');
 }
 
-/**
- * Options for creating a PTY session
- */
-export interface PTYSessionOptions {
-  projectPath: string;
-  prompt: string;
-  agentId: string;
-  resume?: string;
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Streaming PTY Session
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * PTY Session
+ * Streaming PTY Session
  *
- * Manages a single Claude CLI session via PTY.
+ * Manages a persistent Claude CLI session via PTY with bidirectional JSON streaming.
+ * Supports multiple messages in the same session and proper session UUID handling.
  */
-export class PTYSession implements ISession {
+export class StreamingPTYSession implements ISession {
+  // Public identifiers
   public readonly id: string;
   public readonly agentId: string;
   public readonly pluginId = 'claude_cli';
@@ -94,39 +141,133 @@ export class PTYSession implements ISession {
   public readonly projectPath: string;
   public readonly resumeSessionId?: string;
 
+  // Claude's actual session UUID (captured from init or specified)
+  private _claudeSessionId: string;
+
+  // State management
+  private _state: SessionState = 'initializing';
   private ptyProcess: pty.IPty | null = null;
-  private _status: SessionStatus = 'starting';
-  private outputBuffer = '';
-  private emitter = new EventEmitter();
-  private callbacks = new Set<StreamCallback>();
+
+  // Buffers
+  private lineBuffer = '';
+  // Note: pendingMessages no longer needed in hybrid mode (-p passes prompt directly)
+
+  // Event emission
+  private readonly emitter = new EventEmitter();
+  private readonly callbacks = new Set<StreamCallback>();
+
+  // Configuration
+  private readonly options: StreamingPTYSessionOptions;
+
+  // Metrics
+  private messageCount = 0;
+  private lastActivityTime: Date;
   private exitCode: number | null = null;
 
-  constructor(options: PTYSessionOptions) {
+  constructor(options: StreamingPTYSessionOptions) {
     this.id = `session-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     this.agentId = options.agentId;
     this.projectPath = options.projectPath;
-    this.resumeSessionId = options.resume;
+    this.resumeSessionId = options.resumeSessionId;
+    this.options = options;
     this.createdAt = new Date();
-  }
+    this.lastActivityTime = new Date();
 
-  get status(): SessionStatus {
-    return this._status;
+    // Store provided session UUID if any; otherwise it will be captured from init message
+    // Note: We no longer pre-generate a UUID because Claude CLI may reject reused UUIDs
+    this._claudeSessionId = options.sessionId || '';
   }
 
   /**
-   * Start the PTY session
+   * Get the session state
    */
-  async start(prompt: string): Promise<void> {
+  get state(): SessionState {
+    return this._state;
+  }
+
+  /**
+   * Get status for ISession interface
+   */
+  get status(): SessionStatus {
+    switch (this._state) {
+      case 'initializing':
+        return 'starting';
+      case 'ready':
+      case 'processing':
+      case 'idle':
+        return 'running';
+      case 'error':
+        return 'error';
+      case 'stopped':
+        return 'stopped';
+      default:
+        return 'running';
+    }
+  }
+
+  /**
+   * Get Claude CLI's actual session UUID
+   * Use this for --resume operations
+   */
+  get claudeSessionId(): string {
+    return this._claudeSessionId;
+  }
+
+  /**
+   * Start the PTY process in hybrid mode (-p + stream-json output)
+   *
+   * The prompt is passed via -p flag, so it's required for this method.
+   * The process starts immediately and begins processing the prompt.
+   */
+  async start(initialPrompt: string): Promise<void> {
+    if (!initialPrompt) {
+      this._state = 'error';
+      this.emitEvent({
+        sessionId: this.id,
+        type: 'error',
+        data: { error: 'Initial prompt is required for hybrid mode' },
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
     const claudePath = findClaudeBinary();
 
-    const args = this.buildArgs(prompt);
-    console.log(`[PTYSession] Spawning: ${claudePath} ${args.join(' ')}`);
+    let effectiveProjectPath = this.projectPath;
+    console.log(`[HybridPTY] Using project path: ${effectiveProjectPath}`);
+    console.log(`[HybridPTY] Permission mode: ${this.options.permissionMode || 'bypassPermissions'}`);
+    console.log(`[HybridPTY] Resume session: ${this.options.resumeSessionId || 'none'}`);
+
+    if (!existsSync(effectiveProjectPath)) {
+      console.error(`[HybridPTY] Project path does not exist: ${effectiveProjectPath}`);
+
+      // Try to fix common path issues
+      const fixedPath = effectiveProjectPath.replace(/\/my\/projects\//, '/my_projects/');
+      if (existsSync(fixedPath)) {
+        console.log(`[HybridPTY] Found corrected path: ${fixedPath}`);
+        effectiveProjectPath = fixedPath;
+      } else {
+        this._state = 'error';
+        this.emitEvent({
+          sessionId: this.id,
+          type: 'error',
+          data: { error: `Project path does not exist: ${effectiveProjectPath}` },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+    }
+
+    // Build args with the prompt passed via -p flag
+    const args = this.buildArgs(initialPrompt);
+    console.log(`[HybridPTY] Spawning: ${claudePath} -p "..." ${args.slice(2).join(' ')}`);
+    console.log(`[HybridPTY] CWD: ${effectiveProjectPath}`);
 
     this.ptyProcess = pty.spawn(claudePath, args, {
-      name: 'xterm-color',
-      cols: 120,
-      rows: 40,
-      cwd: this.projectPath,
+      name: 'xterm-256color',
+      cols: 200,
+      rows: 50,
+      cwd: effectiveProjectPath,
       env: {
         ...process.env,
         TERM: 'xterm-256color',
@@ -135,155 +276,272 @@ export class PTYSession implements ISession {
       },
     });
 
-    this._status = 'running';
+    // Set state to processing immediately - the prompt is being processed
+    this._state = 'processing';
+    this.messageCount++;
 
-    // Handle output
+    // Handle output - process starts immediately with -p mode
     this.ptyProcess.onData((data: string) => {
-      this.handleOutput(data);
+      this.handleData(data);
     });
 
     // Handle exit
     this.ptyProcess.onExit(({ exitCode }) => {
-      this.exitCode = exitCode;
-      this._status = exitCode === 0 ? 'completed' : 'error';
-
-      this.emitEvent({
-        sessionId: this.id,
-        type: 'complete',
-        data: { exitCode },
-        timestamp: new Date().toISOString(),
-      });
-
-      console.log(`[PTYSession] Process exited with code: ${exitCode}`);
+      this.handleExit(exitCode);
     });
 
-    // Wait briefly for initialization
-    await this.waitForInit();
+    // No need to wait for init or send messages separately
+    // The -p flag passes the prompt directly and Claude processes it immediately
+    console.log(`[HybridPTY] Process started, state: ${this._state}`);
   }
 
   /**
-   * Build CLI arguments for Claude
+   * Build CLI arguments for hybrid mode (-p + stream-json output)
+   *
+   * Uses -p to pass the prompt as argument (reliable with PTY spawn)
+   * and --output-format stream-json for structured JSON output.
    */
   private buildArgs(prompt: string): string[] {
     const args: string[] = [];
 
-    // Resume or new session
-    if (this.resumeSessionId) {
-      args.push('--resume', this.resumeSessionId);
-    }
-
-    // Prompt
+    // Use -p flag to pass the prompt (works reliably with PTY)
     args.push('-p', prompt);
+
+    // Output format: structured JSON (no ANSI parsing needed)
+    args.push('--output-format', 'stream-json');
+    args.push('--verbose');
+
+    // Include partial messages for real-time streaming
+    args.push('--include-partial-messages');
 
     // Model
     args.push('--model', this.agentId);
 
-    // Output format
-    args.push('--output-format', 'stream-json');
+    // Permission mode - default to bypassPermissions for automated use
+    const permissionMode = this.options.permissionMode || 'bypassPermissions';
+    args.push('--permission-mode', permissionMode);
 
-    // Verbose output
-    args.push('--verbose');
+    // Resume: for follow-up messages in the same conversation
+    if (this.options.resumeSessionId) {
+      args.push('--resume', this.options.resumeSessionId);
+      if (this.options.forkSession) {
+        args.push('--fork-session');
+      }
+    }
 
-    // Skip permission prompts (required for non-interactive)
-    args.push('--dangerously-skip-permissions');
+    // Tool control
+    if (this.options.tools?.length) {
+      args.push('--tools', ...this.options.tools);
+    }
+    if (this.options.disallowedTools?.length) {
+      args.push('--disallowed-tools', ...this.options.disallowedTools);
+    }
 
     return args;
   }
 
+  // NOTE: waitForInit() is no longer needed in hybrid mode (-p)
+  // The process starts immediately with the prompt passed via -p flag
+
   /**
-   * Wait for initial output from Claude
+   * Handle raw data from PTY
    */
-  private waitForInit(): Promise<void> {
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        resolve();
-      }, 3000);
+  private handleData(data: string): void {
+    this.lastActivityTime = new Date();
+    this.lineBuffer += data;
 
-      // Resolve early if we get output
-      const handler = () => {
-        clearTimeout(timeout);
-        this.emitter.off('output', handler);
-        resolve();
-      };
+    // Process complete lines (JSON is newline-delimited)
+    const lines = this.lineBuffer.split('\n');
+    this.lineBuffer = lines.pop() || ''; // Keep incomplete line
 
-      this.emitter.once('output', handler);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      this.processLine(trimmed);
+    }
+  }
+
+  /**
+   * Process a complete JSON line
+   */
+  private processLine(line: string): void {
+    // Log for debugging
+    console.log(`[HybridPTY] Line: ${line.substring(0, 150)}${line.length > 150 ? '...' : ''}`);
+
+    try {
+      const message = JSON.parse(line);
+      this.handleMessage(message);
+    } catch {
+      // Not valid JSON, emit as raw output
+      console.log(`[HybridPTY] Non-JSON line: ${line.substring(0, 100)}`);
+      this.emitEvent({
+        sessionId: this.id,
+        type: 'output',
+        data: { raw: line },
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }
+
+  /**
+   * Handle a parsed Claude message
+   */
+  private handleMessage(message: Record<string, unknown>): void {
+    const type = message.type as string;
+    const subtype = message.subtype as string | undefined;
+
+    switch (type) {
+      case 'system':
+        if (subtype === 'init') {
+          this.handleInit(message);
+        } else {
+          this.emitOutput(message);
+        }
+        break;
+
+      case 'assistant':
+        this._state = 'processing';
+        this.emitOutput(message);
+        break;
+
+      case 'result':
+        this.handleResult(message);
+        break;
+
+      case 'user':
+        // User message echoed back (from --replay-user-messages if enabled)
+        this.emitOutput(message);
+        break;
+
+      default:
+        // Forward unknown types as output
+        this.emitOutput(message);
+    }
+  }
+
+  /**
+   * Handle init message
+   */
+  private handleInit(message: Record<string, unknown>): void {
+    console.log(`[HybridPTY] Received init message`);
+
+    // Capture the actual session ID from Claude if different
+    const sessionId = message.session_id as string | undefined;
+    if (sessionId) {
+      this._claudeSessionId = sessionId;
+      console.log(`[HybridPTY] Captured Claude session ID: ${sessionId}`);
+    }
+
+    this._state = 'ready';
+
+    // Emit init event with the Claude session ID
+    this.emitEvent({
+      sessionId: this.id,
+      type: 'init',
+      data: {
+        message,
+        claudeSessionId: this._claudeSessionId,
+      },
+      timestamp: new Date().toISOString(),
+    });
+
+    // Also emit as output for UI
+    this.emitOutput(message);
+  }
+
+  /**
+   * Handle result message (task complete)
+   *
+   * In hybrid mode (-p), the result message contains the session_id
+   * that we need for future --resume operations.
+   */
+  private handleResult(message: Record<string, unknown>): void {
+    const isError = message.is_error as boolean;
+    const resultSubtype = message.subtype as string;
+
+    console.log(`[HybridPTY] Result: ${resultSubtype}, isError: ${isError}`);
+
+    // Capture the session_id for future resume operations
+    const sessionId = message.session_id as string | undefined;
+    if (sessionId && !this._claudeSessionId) {
+      this._claudeSessionId = sessionId;
+      console.log(`[HybridPTY] Captured Claude session ID: ${sessionId}`);
+    }
+
+    // Update state to completed (not idle, since in hybrid mode process will exit)
+    this._state = 'idle';
+
+    // Emit as output
+    this.emitOutput(message);
+
+    // In hybrid mode, after result the process will exit
+    // Complete event will be emitted in handleExit()
+  }
+
+  /**
+   * Emit an output event
+   */
+  private emitOutput(message: Record<string, unknown>): void {
+    this.emitEvent({
+      sessionId: this.id,
+      type: 'output',
+      data: { message },
+      timestamp: new Date().toISOString(),
     });
   }
 
   /**
-   * Handle output from the PTY process
+   * Handle PTY exit
    */
-  private handleOutput(data: string): void {
-    this.outputBuffer += data;
+  private handleExit(exitCode: number | null): void {
+    this.exitCode = exitCode;
+    this._state = exitCode === 0 ? 'stopped' : 'error';
 
-    // Process complete lines
-    const lines = this.outputBuffer.split('\n');
-    this.outputBuffer = lines.pop() || '';
+    console.log(`[HybridPTY] Process exited with code: ${exitCode}`);
 
-    for (const line of lines) {
-      if (!line.trim()) continue;
+    // Include claudeSessionId in the complete event for resume functionality
+    this.emitEvent({
+      sessionId: this.id,
+      type: 'complete',
+      data: {
+        exitCode,
+        claudeSessionId: this._claudeSessionId,
+      },
+      timestamp: new Date().toISOString(),
+    });
 
-      // Try to parse as JSON
-      let event: SessionEvent;
-      try {
-        const parsed = JSON.parse(line);
-
-        // Extract session ID from init message if present
-        if (parsed.type === 'system' && parsed.subtype === 'init' && parsed.session_id) {
-          // Update our session ID to match Claude's
-          (this as { id: string }).id = parsed.session_id;
-        }
-
-        event = {
-          sessionId: this.id,
-          type: 'output',
-          data: { message: parsed },
-          timestamp: new Date().toISOString(),
-        };
-      } catch {
-        // Not JSON, emit as raw
-        event = {
-          sessionId: this.id,
-          type: 'output',
-          data: { raw: line },
-          timestamp: new Date().toISOString(),
-        };
-      }
-
-      this.emitEvent(event);
-    }
+    this.ptyProcess = null;
   }
 
   /**
    * Emit an event to all subscribers
    */
   private emitEvent(event: SessionEvent): void {
-    this.emitter.emit('output', event);
+    console.log(`[HybridPTY] Emitting event: type=${event.type}, callbacks=${this.callbacks.size}`);
+    this.emitter.emit('event', event);
     for (const callback of this.callbacks) {
       try {
         callback(event);
       } catch (error) {
-        console.error('[PTYSession] Callback error:', error);
+        console.error('[HybridPTY] Callback error:', error);
       }
     }
   }
 
   /**
-   * Send a message to the running session
+   * Send a follow-up message
+   *
+   * In hybrid mode (-p), each message creates a new process.
+   * For follow-up messages, create a new session with resumeSessionId set.
    */
-  async sendMessage(message: string): Promise<{ success: boolean; error?: string }> {
-    if (!this.ptyProcess || this._status !== 'running') {
-      return { success: false, error: 'Session not running' };
-    }
-
-    try {
-      // Write message followed by newline
-      this.ptyProcess.write(message + '\n');
-      return { success: true };
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      return { success: false, error: errorMsg };
-    }
+  async sendMessage(_content: string): Promise<{ success: boolean; error?: string }> {
+    // In hybrid mode, we don't send messages to the running session
+    // Instead, the caller should create a new session with --resume
+    console.log(`[HybridPTY] sendMessage called - in hybrid mode, use a new session with resume`);
+    return {
+      success: false,
+      error: 'In hybrid mode, create a new session with resumeSessionId for follow-up messages',
+    };
   }
 
   /**
@@ -298,31 +556,29 @@ export class PTYSession implements ISession {
   }
 
   /**
-   * Stop the session
-   * Uses two-phase kill: SIGTERM first, then SIGKILL after timeout
+   * Stop the session gracefully
    */
   async stop(): Promise<void> {
     if (!this.ptyProcess) {
       return;
     }
 
-    console.log(`[PTYSession] Stopping session ${this.id}`);
-    this._status = 'stopped';
+    console.log(`[HybridPTY] Stopping session ${this.id}`);
+    this._state = 'stopped';
 
-    // Phase 1: SIGTERM
+    // Send SIGTERM first
     try {
       this.ptyProcess.kill('SIGTERM');
     } catch {
-      // Already dead
       this.ptyProcess = null;
       return;
     }
 
-    // Phase 2: SIGKILL after 5 seconds if still running
+    // Wait for exit or force kill after 5 seconds
     await new Promise<void>((resolve) => {
       const timeout = setTimeout(() => {
         if (this.ptyProcess) {
-          console.log(`[PTYSession] Force killing session ${this.id}`);
+          console.log(`[HybridPTY] Force killing session ${this.id}`);
           try {
             this.ptyProcess.kill('SIGKILL');
           } catch {
@@ -332,31 +588,48 @@ export class PTYSession implements ISession {
         resolve();
       }, 5000);
 
-      // Resolve early if process exits
-      const checkExit = () => {
-        if (!this.ptyProcess) {
-          clearTimeout(timeout);
-          resolve();
-        }
-      };
-
       this.emitter.once('exit', () => {
         clearTimeout(timeout);
         resolve();
       });
-
-      // Also check periodically
-      const interval = setInterval(() => {
-        checkExit();
-        if (!this.ptyProcess) {
-          clearInterval(interval);
-        }
-      }, 100);
-
-      setTimeout(() => clearInterval(interval), 6000);
     });
 
     this.ptyProcess = null;
     this.callbacks.clear();
   }
+
+  /**
+   * Get session info
+   */
+  getInfo(): {
+    id: string;
+    claudeSessionId: string;
+    state: SessionState;
+    messageCount: number;
+    lastActivity: Date;
+  } {
+    return {
+      id: this.id,
+      claudeSessionId: this._claudeSessionId,
+      state: this._state,
+      messageCount: this.messageCount,
+      lastActivity: this.lastActivityTime,
+    };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Legacy Exports (for backwards compatibility)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Re-export as PTYSession for backwards compatibility with existing code
+export { StreamingPTYSession as PTYSession };
+
+// Legacy options interface
+export interface PTYSessionOptions {
+  projectPath: string;
+  prompt: string;
+  agentId: string;
+  resume?: string;
+  bypassMode?: boolean;
 }

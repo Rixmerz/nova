@@ -8,12 +8,26 @@
 /**
  * Session status
  */
-export type SessionStatus = 'starting' | 'running' | 'completed' | 'error' | 'stopped';
+export type SessionStatus = 'starting' | 'running' | 'completed' | 'error' | 'stopped' | 'waiting-for-input';
 
 /**
  * Session event types
  */
-export type SessionEventType = 'output' | 'error' | 'complete' | 'status';
+export type SessionEventType = 'output' | 'error' | 'complete' | 'status' | 'interactive-prompt';
+
+/**
+ * Interactive prompt from agent (e.g., bypass confirmation, tool approval)
+ */
+export interface InteractivePrompt {
+  type: 'bypass-confirm' | 'tool-approval' | 'file-edit' | 'selection';
+  title: string;
+  description?: string;
+  options: Array<{
+    key: string;
+    label: string;
+    isDefault?: boolean;
+  }>;
+}
 
 /**
  * Session event payload
@@ -41,6 +55,9 @@ export interface SessionEvent {
 
     /** New status (for status events) */
     status?: SessionStatus;
+
+    /** Interactive prompt (for interactive-prompt events) */
+    prompt?: InteractivePrompt;
   };
 
   /** ISO timestamp of the event */
@@ -56,7 +73,7 @@ export type StreamCallback = (event: SessionEvent) => void;
  * Session instance
  */
 export interface ISession {
-  /** Unique session identifier */
+  /** Unique session identifier (Nova's internal ID) */
   id: string;
 
   /** Agent ID being used */
@@ -76,6 +93,9 @@ export interface ISession {
 
   /** Optional session to resume from */
   resumeSessionId?: string;
+
+  /** Claude CLI session UUID (used for resume operations) */
+  claudeSessionId?: string;
 }
 
 /**
@@ -90,6 +110,9 @@ export interface InvokeOptions {
 
   /** Session ID to resume (optional) */
   resume?: string;
+
+  /** Bypass mode - auto-accept interactive prompts */
+  bypassMode?: boolean;
 
   /** Additional options for the agent */
   options?: Record<string, unknown>;

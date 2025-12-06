@@ -1,14 +1,14 @@
 /**
  * Claude CLI Plugin for Nova
  *
- * Provides Claude CLI integration via node-pty.
+ * Provides Claude CLI integration via node-pty with streaming JSON I/O.
  * Supports haiku, sonnet, and opus models.
  */
-import { PTYSession } from './pty-session.js';
+import { StreamingPTYSession, } from './pty-session.js';
 /**
  * Claude CLI Plugin
  *
- * Implements INovaPlugin for Claude CLI integration.
+ * Implements INovaPlugin for Claude CLI integration with streaming JSON I/O.
  */
 class ClaudeCLIPlugin {
     // Metadata
@@ -39,7 +39,7 @@ class ClaudeCLIPlugin {
         if (this.initialized) {
             return;
         }
-        console.log('[ClaudeCLI] Initializing plugin...');
+        console.log('[ClaudeCLI] Initializing plugin (streaming mode)...');
         // Build agent list from manifest with config overrides
         this._agents = this.manifest.agents.map((agentDef) => ({
             id: agentDef.id,
@@ -74,7 +74,7 @@ class ClaudeCLIPlugin {
         return this._agents.find((a) => a.id === agentId);
     }
     /**
-     * Invoke an agent and create a new session
+     * Invoke an agent and create a new streaming session
      */
     async invoke(agentId, options) {
         const agent = this.getAgent(agentId);
@@ -85,18 +85,37 @@ class ClaudeCLIPlugin {
             throw new Error(`Agent '${agentId}' is disabled`);
         }
         console.log(`[ClaudeCLI] Invoking agent ${agentId} with prompt: ${options.prompt.substring(0, 50)}...`);
-        const session = new PTYSession({
+        // Convert legacy bypassMode to permissionMode
+        let permissionMode = options.permissionMode || 'bypassPermissions';
+        if (options.bypassMode === false) {
+            permissionMode = 'default';
+        }
+        console.log(`[ClaudeCLI] Permission mode: ${permissionMode}`);
+        console.log(`[ClaudeCLI] Resume session: ${options.resume || 'none'}`);
+        const session = new StreamingPTYSession({
             projectPath: options.projectPath,
-            prompt: options.prompt,
             agentId,
-            resume: options.resume,
+            permissionMode,
+            resumeSessionId: options.resume,
+            tools: options.tools,
+            disallowedTools: options.disallowedTools,
         });
-        // Start the session
-        await session.start(options.prompt);
-        // Store session
+        // Store session before starting
         this.sessions.set(session.id, session);
+        // Start the session with the initial prompt
+        await session.start(options.prompt);
         console.log(`[ClaudeCLI] Session created: ${session.id}`);
-        return session;
+        console.log(`[ClaudeCLI] Claude session ID: ${session.claudeSessionId}`);
+        return {
+            id: session.id,
+            agentId: session.agentId,
+            pluginId: session.pluginId,
+            status: session.status,
+            createdAt: session.createdAt,
+            projectPath: session.projectPath,
+            resumeSessionId: session.resumeSessionId,
+            claudeSessionId: session.claudeSessionId,
+        };
     }
     /**
      * Send a message to a running session
@@ -106,6 +125,7 @@ class ClaudeCLIPlugin {
         if (!session) {
             return { success: false, error: `Session '${sessionId}' not found` };
         }
+        console.log(`[ClaudeCLI] Sending message to session ${sessionId}: ${message.substring(0, 50)}...`);
         return session.sendMessage(message);
     }
     /**
@@ -135,13 +155,34 @@ class ClaudeCLIPlugin {
      * Get a session by ID
      */
     getSession(sessionId) {
-        return this.sessions.get(sessionId);
+        const session = this.sessions.get(sessionId);
+        if (!session)
+            return undefined;
+        return {
+            id: session.id,
+            agentId: session.agentId,
+            pluginId: session.pluginId,
+            status: session.status,
+            createdAt: session.createdAt,
+            projectPath: session.projectPath,
+            resumeSessionId: session.resumeSessionId,
+            claudeSessionId: session.claudeSessionId,
+        };
     }
     /**
      * Get all active sessions
      */
     getSessions() {
-        return Array.from(this.sessions.values());
+        return Array.from(this.sessions.values()).map((session) => ({
+            id: session.id,
+            agentId: session.agentId,
+            pluginId: session.pluginId,
+            status: session.status,
+            createdAt: session.createdAt,
+            projectPath: session.projectPath,
+            resumeSessionId: session.resumeSessionId,
+            claudeSessionId: session.claudeSessionId,
+        }));
     }
 }
 /**

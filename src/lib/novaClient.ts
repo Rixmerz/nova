@@ -37,16 +37,29 @@ interface JSONRPCNotification {
   params?: Record<string, unknown>;
 }
 
+// Interactive prompt from agent (e.g., bypass confirmation, tool approval)
+export interface InteractivePrompt {
+  type: 'bypass-confirm' | 'tool-approval' | 'file-edit' | 'selection';
+  title: string;
+  description?: string;
+  options: Array<{
+    key: string;
+    label: string;
+    isDefault?: boolean;
+  }>;
+}
+
 // Agent event payload from Nova server
 export interface SessionEvent {
   sessionId: string;
-  type: 'output' | 'error' | 'complete' | 'status';
+  type: 'output' | 'error' | 'complete' | 'status' | 'interactive-prompt';
   data: {
     message?: Record<string, unknown>;
     raw?: string;
     error?: string;
     exitCode?: number | null;
     status?: string;
+    prompt?: InteractivePrompt;
   };
   timestamp: string;
 }
@@ -115,11 +128,13 @@ export interface InvokeOptions {
   projectPath: string;
   prompt: string;
   resume?: string;
+  bypassMode?: boolean;
 }
 
 // Result from agent.invoke
 export interface InvokeResult {
   sessionId: string;
+  claudeSessionId?: string;
   status: string;
   agentId: string;
   pluginId: string;
@@ -148,6 +163,11 @@ class NovaClient {
   private maxReconnectAttempts = 5;
   private reconnectDelay = 1000;
   private isConnected = false;
+
+  // Buffer for events that arrive before handlers are registered
+  // This fixes the race condition where events arrive before onSessionEvent() is called
+  private eventBuffer = new Map<string, SessionEvent[]>();
+  private bufferTimeout = 30000; // 30 second buffer expiry
 
   /**
    * Connect to the Nova server
@@ -227,11 +247,37 @@ class NovaClient {
 
   /**
    * Dispatch a session event to handlers
+   * If no handlers are registered yet, buffer the event for later replay
    */
   private dispatchEvent(event: SessionEvent): void {
-    // Session-specific handlers
+    console.log(`[NovaClient] Dispatching event: sessionId=${event.sessionId}, type=${event.type}`);
+
     const handlers = this.eventHandlers.get(event.sessionId);
+    const hasSessionHandlers = handlers && handlers.size > 0;
+    const hasGlobalHandlers = this.globalEventHandlers.size > 0;
+
+    // If no handlers registered yet, buffer the event for later replay
+    if (!hasSessionHandlers && !hasGlobalHandlers) {
+      console.log(`[NovaClient] No handlers registered, buffering event for session ${event.sessionId}`);
+      let buffer = this.eventBuffer.get(event.sessionId);
+      if (!buffer) {
+        buffer = [];
+        this.eventBuffer.set(event.sessionId, buffer);
+        // Auto-expire buffer after timeout to prevent memory leaks
+        setTimeout(() => {
+          if (this.eventBuffer.has(event.sessionId)) {
+            console.log(`[NovaClient] Expiring buffer for session ${event.sessionId}`);
+            this.eventBuffer.delete(event.sessionId);
+          }
+        }, this.bufferTimeout);
+      }
+      buffer.push(event);
+      return;
+    }
+
+    // Session-specific handlers
     if (handlers) {
+      console.log(`[NovaClient] Found ${handlers.size} handlers for session ${event.sessionId}`);
       for (const handler of handlers) {
         try {
           handler(event);
@@ -353,6 +399,7 @@ class NovaClient {
       projectPath: options.projectPath,
       prompt: options.prompt,
       resume: options.resume,
+      bypassMode: options.bypassMode,
     });
   }
 
@@ -487,6 +534,7 @@ class NovaClient {
 
   /**
    * Subscribe to session events for a specific session
+   * Replays any buffered events that arrived before the handler was registered
    * @param sessionId Session to subscribe to
    * @param handler Event handler function
    * @returns Unsubscribe function
@@ -498,6 +546,21 @@ class NovaClient {
       this.eventHandlers.set(sessionId, handlers);
     }
     handlers.add(handler);
+
+    // Replay any buffered events that arrived before this handler was registered
+    const buffered = this.eventBuffer.get(sessionId);
+    if (buffered && buffered.length > 0) {
+      console.log(`[NovaClient] Replaying ${buffered.length} buffered events for session ${sessionId}`);
+      for (const event of buffered) {
+        try {
+          handler(event);
+        } catch (error) {
+          console.error('[NovaClient] Error replaying buffered event:', error);
+        }
+      }
+      // Clear the buffer after replay
+      this.eventBuffer.delete(sessionId);
+    }
 
     // Return unsubscribe function
     return () => {

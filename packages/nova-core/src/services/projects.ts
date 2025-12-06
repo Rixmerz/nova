@@ -39,23 +39,76 @@ function getProjectsDir(): string {
 }
 
 /**
- * Decode project path from directory name
- * Claude encodes paths like: -Users-juanpablodiaz-my_projects-opcode
- * The encoding replaces / with - but preserves underscores
+ * Resolve project path from directory name using smart filesystem matching
+ * This handles cases where underscores were encoded as dashes (e.g. my_projects -> my-projects)
  */
-function decodeProjectPath(dirName: string): string {
-  // The directory name format is: -Users-user-path-to-project
-  // This corresponds to: /Users/user/path/to/project
-  // We need to replace dashes with slashes, but only those that were originally slashes
-  // The trick is that underscores in the original path are preserved as underscores
+async function resolveProjectPath(dirName: string): Promise<string> {
+  // Initial parts from the directory name (ID)
+  // e.g. -Users-juanpablodiaz-my-projects-grafio -> ['Users', 'juanpablodiaz', 'my', 'projects', 'grafio']
+  let parts = dirName.split('-').filter(Boolean);
 
-  // Replace leading dash with /
-  let path = dirName.replace(/^-/, '/');
+  // Start at root
+  let currentPath = '/';
 
-  // Replace remaining dashes with /
-  path = path.replace(/-/g, '/');
+  // Safety check: prevent infinite loops
+  let iterations = 0;
+  const maxIterations = 100;
 
-  return path;
+  console.log(`[Projects] Resolving path for ID: ${dirName}`);
+
+  while (parts.length > 0 && iterations < maxIterations) {
+    iterations++;
+
+    try {
+      const entries = await readdir(currentPath);
+      let bestMatch: string | null = null;
+      let maxConsumed = 0;
+
+      for (const entry of entries) {
+        // Simulate the lossy encoding: _ becomes -
+        // Also handle the fact that the ID is all dashes.
+        // So 'My_Project' -> 'My-Project' -> ['My', 'Project']
+        const entryParts = entry.replace(/_/g, '-').split('-');
+
+        // Check if this entry matches the start of our remaining parts
+        // Case-insensitive matching for robustness
+        if (entryParts.length <= parts.length) {
+          const prefix = parts.slice(0, entryParts.length);
+          const isMatch = entryParts.every((p, i) => p.toLowerCase() === prefix[i].toLowerCase());
+
+          if (isMatch) {
+            // Prefer longer matches (e.g. match 'my_projects' over 'my')
+            if (entryParts.length > maxConsumed) {
+              maxConsumed = entryParts.length;
+              bestMatch = entry;
+            }
+          }
+        }
+      }
+
+      if (bestMatch) {
+        // console.log(`[Projects] Matched segment: ${bestMatch}`);
+        currentPath = join(currentPath, bestMatch);
+        parts = parts.slice(maxConsumed);
+      } else {
+        console.log(`[Projects] No match found for segments: ${parts.join('-')} in ${currentPath}`);
+        // No matching entry found.
+        // This could happen if the directory doesn't exist or we don't have permissions.
+        // Fallback: append the next part as a directory.
+        currentPath = join(currentPath, parts[0]);
+        parts = parts.slice(1);
+      }
+    } catch (error) {
+      console.error(`[Projects] Error reading directory ${currentPath}:`, error);
+      // Can't read directory (e.g. permission denied or doesn't exist)
+      // Fallback for remaining parts
+      currentPath = join(currentPath, ...parts);
+      break;
+    }
+  }
+
+  console.log(`[Projects] Resolved path: ${currentPath}`);
+  return currentPath;
 }
 
 /**
@@ -104,7 +157,9 @@ export async function listProjects(): Promise<Project[]> {
       if (!entry.isDirectory()) continue;
 
       const projectDirPath = join(projectsDir, entry.name);
-      const projectPath = decodeProjectPath(entry.name);
+
+      // Use smart resolution to get the real path
+      const projectPath = await resolveProjectPath(entry.name);
 
       try {
         const stats = await stat(projectDirPath);

@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover } from "@/components/ui/popover";
 import { api, type Session } from "@/lib/api";
+import { getEnvironmentInfo } from "@/lib/apiAdapter";
 import { cn } from "@/lib/utils";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { StreamMessage } from "./StreamMessage";
@@ -23,6 +24,8 @@ import { TimelineNavigator } from "./TimelineNavigator";
 import { CheckpointSettings } from "./CheckpointSettings";
 import { SlashCommandsManager } from "./SlashCommandsManager";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { InteractivePromptDialog, type InteractivePrompt } from "./InteractivePromptDialog";
+import { novaClient } from "@/lib/novaClient";
 import { TooltipProvider, TooltipSimple } from "@/components/ui/tooltip-modern";
 import { SplitPane } from "@/components/ui/split-pane";
 import { WebviewPreview } from "./WebviewPreview";
@@ -85,6 +88,9 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
   const [totalTokens, setTotalTokens] = useState(0);
   const [extractedSessionInfo, setExtractedSessionInfo] = useState<{ sessionId: string; projectId: string } | null>(null);
   const [claudeSessionId, setClaudeSessionId] = useState<string | null>(null);
+  // Nova session ID for session.message (different from Claude's internal session ID)
+  const [novaSessionId, setNovaSessionId] = useState<string | null>(null);
+  const [currentModel, setCurrentModel] = useState<"haiku" | "sonnet" | "opus">("haiku");
   const [showTimeline, setShowTimeline] = useState(false);
   const [timelineVersion, setTimelineVersion] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
@@ -105,6 +111,9 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
   
   // Add collapsed state for queued prompts
   const [queuedPromptsCollapsed, setQueuedPromptsCollapsed] = useState(false);
+
+  // Interactive prompt state (for Claude CLI prompts like bypass confirmation)
+  const [pendingPrompt, setPendingPrompt] = useState<InteractivePrompt | null>(null);
 
   const parentRef = useRef<HTMLDivElement>(null);
   const unlistenRefs = useRef<UnlistenFn[]>([]);
@@ -272,6 +281,49 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
   useEffect(() => {
     onStreamingChange?.(isLoading, claudeSessionId);
   }, [isLoading, claudeSessionId, onStreamingChange]);
+
+  // Listen for Nova session creation events (for session.message reuse)
+  useEffect(() => {
+    const handleNovaSessionCreated = (event: Event) => {
+      const customEvent = event as CustomEvent<{ sessionId: string; model: string }>;
+      console.log('[ClaudeCodeSession] Nova session created:', customEvent.detail);
+      setNovaSessionId(customEvent.detail.sessionId);
+      if (customEvent.detail.model) {
+        setCurrentModel(customEvent.detail.model as "haiku" | "sonnet" | "opus");
+      }
+    };
+
+    window.addEventListener('nova-session-created', handleNovaSessionCreated);
+    return () => {
+      window.removeEventListener('nova-session-created', handleNovaSessionCreated);
+    };
+  }, []);
+
+  // Listen for interactive prompts from Claude CLI (bypass confirmation, tool approval, etc.)
+  useEffect(() => {
+    const handleInteractivePrompt = (event: Event) => {
+      const customEvent = event as CustomEvent<{ sessionId: string; prompt: InteractivePrompt }>;
+      console.log('[ClaudeCodeSession] Interactive prompt received:', customEvent.detail);
+      setPendingPrompt(customEvent.detail.prompt);
+    };
+
+    window.addEventListener('claude-interactive-prompt', handleInteractivePrompt);
+    return () => {
+      window.removeEventListener('claude-interactive-prompt', handleInteractivePrompt);
+    };
+  }, []);
+
+  // Handler for responding to interactive prompts
+  const handlePromptResponse = async (sessionId: string, response: string) => {
+    console.log('[ClaudeCodeSession] Responding to prompt:', { sessionId, response });
+    try {
+      await novaClient.sendMessage(sessionId, response);
+      setPendingPrompt(null);
+    } catch (error) {
+      console.error('[ClaudeCodeSession] Failed to respond to prompt:', error);
+      setError('Failed to respond to prompt');
+    }
+  };
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -550,6 +602,41 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
         });
 
         unlistenRefs.current.push(outputUnlisten);
+
+        // Nova mode: Also listen to DOM events since Nova uses window.dispatchEvent()
+        // instead of Tauri's event system
+        const envInfo = getEnvironmentInfo();
+        if (envInfo.isNovaEnabled) {
+          console.log('[ClaudeCodeSession] Nova mode detected, adding DOM event listeners');
+
+          // Listen for output messages
+          const domEventHandler = (event: Event) => {
+            const customEvent = event as CustomEvent;
+            console.log('[ClaudeCodeSession] Received DOM claude-output event:', customEvent.detail);
+            // customEvent.detail is the message object from Nova
+            handleStreamMessage(customEvent.detail);
+          };
+          window.addEventListener('claude-output', domEventHandler);
+          unlistenRefs.current.push(() => {
+            console.log('[ClaudeCodeSession] Removing DOM claude-output listener');
+            window.removeEventListener('claude-output', domEventHandler);
+          });
+
+          // Listen for completion event to stop the loading state
+          const completeHandler = (event: Event) => {
+            const customEvent = event as CustomEvent;
+            const success = customEvent.detail;
+            console.log('[ClaudeCodeSession] Received DOM claude-complete event, success:', success);
+            setIsLoading(false);
+            hasActiveSessionRef.current = false;
+            isListeningRef.current = false;
+          };
+          window.addEventListener('claude-complete', completeHandler);
+          unlistenRefs.current.push(() => {
+            console.log('[ClaudeCodeSession] Removing DOM claude-complete listener');
+            window.removeEventListener('claude-complete', completeHandler);
+          });
+        }
 
         // Helper to process any JSONL stream message string or object
         function handleStreamMessage(payload: string | ClaudeStreamMessage) {
@@ -831,14 +918,25 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
         });
 
         // Execute the appropriate command
-        // Use claudeSessionId directly (most reliable) or fall back to effectiveSession.id
-        const sessionIdToUse = claudeSessionId || effectiveSession?.id;
-        if (sessionIdToUse && !isFirstPrompt) {
-          console.log('[ClaudeCodeSession] Resuming session with ID:', sessionIdToUse);
+        // For Nova mode: use novaSessionId for session.message (reuses PTY process)
+        // For non-Nova mode: use claudeSessionId for --resume
+        const sessionIdToUse = novaSessionId || claudeSessionId || effectiveSession?.id;
+        const modelChanged = model !== currentModel;
+
+        if (sessionIdToUse && !isFirstPrompt && !modelChanged) {
+          // Follow-up message to existing session
+          console.log('[ClaudeCodeSession] Sending follow-up to session:', sessionIdToUse);
           trackEvent.sessionResumed(sessionIdToUse);
           trackEvent.modelSelected(model);
           await api.resumeClaudeCode(projectPath, sessionIdToUse, prompt, model);
         } else {
+          // New session: first prompt or model changed
+          if (modelChanged) {
+            console.log('[ClaudeCodeSession] Model changed, creating new session:', currentModel, '->', model);
+            setCurrentModel(model);
+            // Clear Nova session ID since we need a new one
+            setNovaSessionId(null);
+          }
           console.log('[ClaudeCodeSession] Starting new session');
           setIsFirstPrompt(false);
           trackEvent.sessionCreated(model, 'prompt_input');
@@ -1728,6 +1826,14 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
           </DialogContent>
         </Dialog>
       )}
+
+      {/* Interactive Prompt Dialog (for Claude CLI bypass confirmation, tool approval, etc.) */}
+      <InteractivePromptDialog
+        prompt={pendingPrompt}
+        sessionId={novaSessionId}
+        onRespond={handlePromptResponse}
+        onClose={() => setPendingPrompt(null)}
+      />
       </div>
     </TooltipProvider>
   );

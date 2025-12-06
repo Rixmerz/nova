@@ -33,6 +33,9 @@ let isTauriEnvironment: boolean | null = null;
 let isMCPConnected = false;
 let isNovaConnected = false;
 
+// Map Nova session IDs to Claude CLI session UUIDs (for resume operations)
+const claudeSessionIdMap = new Map<string, string>();
+
 /**
  * Environment types
  */
@@ -195,6 +198,10 @@ async function handleMCPStreamingCommand<T>(command: string, params?: any): Prom
 
 /**
  * Handle Claude execution commands via Nova (new plugin architecture)
+ *
+ * For follow-up messages (resume_claude_code), we try to send to the existing
+ * PTY session via session.message. If the session is no longer running, we
+ * fall back to creating a new session with --resume.
  */
 async function handleNovaStreamingCommand<T>(command: string, params?: any): Promise<T> {
   await ensureNovaConnection();
@@ -203,36 +210,110 @@ async function handleNovaStreamingCommand<T>(command: string, params?: any): Pro
   const prompt = params?.prompt || '';
   const model = params?.model || 'sonnet'; // Nova defaults to sonnet
   const sessionId = params?.sessionId || params?.session_id;
+  const bypassMode = params?.bypassMode ?? false; // Default to normal mode (bypass requires interactive PTY)
 
-  console.log(`[Nova] Handling command: ${command}`, { projectPath, prompt, model, sessionId });
+  console.log(`[Nova] Handling command: ${command}`, { projectPath, prompt, model, sessionId, bypassMode });
 
-  // Determine if we're resuming
-  let resume: string | undefined;
-  if (command === 'resume_claude_code' && sessionId && isValidUUID(sessionId)) {
-    resume = sessionId;
+  // For follow-up messages, try to send to existing session first
+  if (command === 'resume_claude_code' && sessionId) {
+    console.log(`[Nova] Attempting to send message to existing session: ${sessionId}`);
+
+    try {
+      const messageResult = await novaClient.sendMessage(sessionId, prompt);
+
+      if (messageResult.success) {
+        console.log(`[Nova] Message sent to existing session successfully`);
+        // Events will arrive via the existing subscription
+        // Return the same session ID
+        return { sessionId } as T;
+      }
+
+      console.log(`[Nova] Session not active (${messageResult.error}), creating new session with resume`);
+    } catch (error) {
+      console.log(`[Nova] Failed to send message, will create new session:`, error);
+    }
   }
 
-  // Invoke the agent via Nova
+  // Determine if we're resuming (for new session creation)
+  let resume: string | undefined;
+  if (command === 'resume_claude_code' && sessionId) {
+    // Session wasn't active, use --resume to load history
+    // Check if we have a Claude session ID mapped for this Nova session ID
+    const mappedClaudeId = claudeSessionIdMap.get(sessionId);
+    if (mappedClaudeId) {
+      console.log(`[Nova] Using mapped Claude session ID: ${mappedClaudeId} for Nova session: ${sessionId}`);
+      resume = mappedClaudeId;
+    } else if (isValidUUID(sessionId)) {
+      // It's already a valid UUID (likely a Claude session ID from history)
+      console.log(`[Nova] Session ID is already a valid UUID, using directly: ${sessionId}`);
+      resume = sessionId;
+    } else {
+      console.warn(`[Nova] No valid Claude session ID for resume, starting fresh`);
+    }
+  }
+
+  // Invoke the agent via Nova (creates new PTY session)
   const result = await novaClient.invoke({
     plugin: 'claude_cli',
     agent: model as string,
     projectPath,
     prompt,
     resume,
+    bypassMode,
   });
 
-  console.log(`[Nova] Agent invoked with sessionId: ${result.sessionId}`);
+  console.log(`[Nova] Agent invoked with sessionId: ${result.sessionId}, claudeSessionId: ${result.claudeSessionId}`);
+
+  // Store the mapping from Nova session ID to Claude CLI session UUID
+  if (result.claudeSessionId) {
+    claudeSessionIdMap.set(result.sessionId, result.claudeSessionId);
+    console.log(`[Nova] Stored mapping: ${result.sessionId} -> ${result.claudeSessionId}`);
+  }
+
+  // Notify frontend about the new session ID (include Claude session ID for resume)
+  window.dispatchEvent(new CustomEvent('nova-session-created', {
+    detail: {
+      sessionId: result.sessionId,
+      claudeSessionId: result.claudeSessionId,
+      model
+    }
+  }));
 
   // Subscribe to session events and forward them as DOM events for UI compatibility
   const unsubscribe = novaClient.onSessionEvent(result.sessionId, (event: SessionEvent) => {
     console.log(`[Nova] Session event:`, event);
 
     if (event.type === 'output') {
-      // Forward as claude-output event for existing UI compatibility
+      // Filter messages to only send meaningful ones to the UI
+      // Claude CLI stream-json outputs:
+      // - system (init): session info - forward for session tracking
+      // - stream_event: partial deltas - SKIP (causes UI gaps)
+      // - assistant: complete message - forward for display
+      // - result: final result - forward for completion
+      const message = event.data.message;
+      const messageType = message?.type as string | undefined;
+
+      // Skip stream_event messages (partial deltas that cause UI gaps)
+      if (messageType === 'stream_event') {
+        console.log(`[Nova] Skipping stream_event (partial delta)`);
+        return;
+      }
+
+      // Forward meaningful messages to UI
       const customEvent = new CustomEvent('claude-output', {
-        detail: event.data.message || { raw: event.data.raw },
+        detail: message || { raw: event.data.raw },
       });
       window.dispatchEvent(customEvent);
+    } else if (event.type === 'interactive-prompt') {
+      // Forward as claude-interactive-prompt event for UI dialog
+      console.log(`[Nova] Interactive prompt:`, event.data.prompt);
+      const promptEvent = new CustomEvent('claude-interactive-prompt', {
+        detail: {
+          sessionId: result.sessionId,
+          prompt: event.data.prompt,
+        },
+      });
+      window.dispatchEvent(promptEvent);
     } else if (event.type === 'error') {
       console.error(`[Nova] Session error:`, event.data.error);
       const errorEvent = new CustomEvent('claude-error', {
@@ -249,8 +330,8 @@ async function handleNovaStreamingCommand<T>(command: string, params?: any): Pro
     }
   });
 
-  // Return session info for the UI
-  return { sessionId: result.sessionId } as T;
+  // Return session info for the UI (include claudeSessionId for resume operations)
+  return { sessionId: result.sessionId, claudeSessionId: result.claudeSessionId } as T;
 }
 
 /**

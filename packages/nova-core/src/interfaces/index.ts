@@ -16,6 +16,7 @@ export type {
   StreamCallback,
   InvokeOptions,
   MessageResult,
+  InteractivePrompt,
 } from './session.js';
 export type { ISession } from './session.js';
 

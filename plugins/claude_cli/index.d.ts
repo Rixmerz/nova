@@ -1,11 +1,12 @@
 /**
  * Claude CLI Plugin for Nova
  *
- * Provides Claude CLI integration via node-pty.
+ * Provides Claude CLI integration via node-pty with streaming JSON I/O.
  * Supports haiku, sonnet, and opus models.
  */
+import { type PermissionMode, type SessionEvent } from './pty-session.js';
 type AgentCapability = 'chat' | 'tools' | 'plan' | 'code' | 'realtime' | 'vision';
-type SessionStatus = 'starting' | 'running' | 'completed' | 'error' | 'stopped';
+type SessionStatus = 'starting' | 'running' | 'completed' | 'error' | 'stopped' | 'waiting-for-input';
 interface IAgent {
     id: string;
     name: string;
@@ -21,26 +22,23 @@ interface ISession {
     createdAt: Date;
     projectPath: string;
     resumeSessionId?: string;
+    claudeSessionId?: string;
 }
 interface InvokeOptions {
     projectPath: string;
     prompt: string;
     resume?: string;
+    permissionMode?: PermissionMode;
+    tools?: string[];
+    disallowedTools?: string[];
+    bypassMode?: boolean;
+}
+interface InvokeResult extends ISession {
+    claudeSessionId: string;
 }
 interface MessageResult {
     success: boolean;
     error?: string;
-}
-interface SessionEvent {
-    sessionId: string;
-    type: 'output' | 'error' | 'complete' | 'status';
-    data: {
-        message?: Record<string, unknown>;
-        raw?: string;
-        error?: string;
-        exitCode?: number | null;
-    };
-    timestamp: string;
 }
 type StreamCallback = (event: SessionEvent) => void;
 interface PluginManifest {
@@ -66,7 +64,7 @@ interface INovaPlugin {
     shutdown(): Promise<void>;
     readonly agents: IAgent[];
     getAgent(agentId: string): IAgent | undefined;
-    invoke(agentId: string, options: InvokeOptions): Promise<ISession>;
+    invoke(agentId: string, options: InvokeOptions): Promise<InvokeResult>;
     message(sessionId: string, message: string): Promise<MessageResult>;
     stream(sessionId: string, callback: StreamCallback): () => void;
     stop(sessionId: string): Promise<void>;
@@ -82,3 +80,4 @@ interface ConfigLoader {
  */
 export default function createPlugin(manifest: PluginManifest, configLoader: ConfigLoader): INovaPlugin;
 export { createPlugin };
+export type { PermissionMode, SessionEvent };

@@ -134,9 +134,14 @@ export function useClaudeMessages(options: UseClaudeMessagesOptions = {}) {
       
       const envInfo = getEnvironmentInfo();
       console.log('[TRACE] Environment info:', envInfo);
-      
-      if (envInfo.isTauri && tauriListen) {
-        // Tauri mode - use Tauri's event system
+
+      // Nova mode uses DOM events even in Tauri environment
+      // When Nova is enabled, we receive events via window.dispatchEvent('claude-output')
+      // not via Tauri's event system
+      const useNovaDOMEvents = envInfo.isNovaEnabled;
+
+      if (envInfo.isTauri && tauriListen && !useNovaDOMEvents) {
+        // Tauri mode (without Nova) - use Tauri's event system
         console.log('[TRACE] Setting up Tauri event listener for claude-stream');
         eventListenerRef.current = await tauriListen("claude-stream", (event: any) => {
           console.log('[TRACE] Tauri event received:', event);
@@ -166,19 +171,21 @@ export function useClaudeMessages(options: UseClaudeMessagesOptions = {}) {
         
         window.addEventListener('claude-output', webEventHandler);
         console.log('[TRACE] Web event listener added for claude-output');
-        console.log('[TRACE] Event listener function:', webEventHandler);
-        
-        // Test if event listener is working
-        setTimeout(() => {
-          console.log('[TRACE] Testing event dispatch...');
-          window.dispatchEvent(new CustomEvent('claude-output', {
-            detail: { type: 'test', message: 'test event' }
-          }));
-        }, 1000);
-        
+
+        // Nova mode: Also listen for claude-complete event to detect when streaming ends
+        const completeEventHandler = (event: any) => {
+          console.log('[TRACE] Web claude-complete event received:', event);
+          console.log('[TRACE] Complete event detail (success):', event.detail);
+          setIsStreaming(false);
+          options.onStreamingChange?.(false, currentSessionId);
+        };
+        window.addEventListener('claude-complete', completeEventHandler);
+        console.log('[TRACE] Web event listener added for claude-complete');
+
         eventListenerRef.current = () => {
-          console.log('[TRACE] Removing web event listener');
+          console.log('[TRACE] Removing web event listeners');
           window.removeEventListener('claude-output', webEventHandler);
+          window.removeEventListener('claude-complete', completeEventHandler);
         };
       }
     };
